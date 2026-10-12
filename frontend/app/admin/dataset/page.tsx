@@ -107,7 +107,7 @@ export default function VerifiedDatasetPage() {
   };
 
   const handleExport = (format: "json" | "csv") => {
-    const url = `${(process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api").replace(/\/$/, "")}/admin/dataset/export?format=${format}`;
+    const url = `${(process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api").replace(/\/$/, "")}/admin/dataset/export?format=${format}`;
     window.open(url, "_blank");
   };
 
@@ -241,7 +241,7 @@ export default function VerifiedDatasetPage() {
           {datasetImages.map((img) => {
             const displayImgUrl = img.image_url.startsWith("http")
               ? img.image_url
-              : `http://localhost:8000${img.image_url}`;
+              : `${(process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api").replace(/\/api\/?$/, "")}${img.image_url}`;
             const badgeClass = CATEGORY_COLORS[img.waste_category] || "bg-slate-100 text-slate-700 border-slate-300";
 
             return (

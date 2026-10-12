@@ -507,7 +507,7 @@ export default function AdminDashboardPage() {
                   const isSelected = selectedIds.includes(u.id);
                   const displayImgUrl = u.image_url.startsWith("http")
                     ? u.image_url
-                    : `http://localhost:8000${u.image_url}`;
+                    : `${(process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api").replace(/\/api\/?$/, "")}${u.image_url}`;
 
                   return (
                     <tr
@@ -700,7 +700,7 @@ export default function AdminDashboardPage() {
                   src={
                     approvingUpload.image_url.startsWith("http")
                       ? approvingUpload.image_url
-                      : `http://localhost:8000${approvingUpload.image_url}`
+                      : `${(process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api").replace(/\/api\/?$/, "")}${approvingUpload.image_url}`
                   }
                   alt={approvingUpload.object_label}
                   className="w-full h-full object-cover"

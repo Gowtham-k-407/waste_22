@@ -517,7 +517,7 @@ export default function UserUploadsPage() {
                   const StatusIcon = statusInfo.icon;
                   const displayImgUrl = u.image_url.startsWith("http")
                     ? u.image_url
-                    : `http://localhost:8000${u.image_url}`;
+                    : `${(process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api").replace(/\/api\/?$/, "")}${u.image_url}`;
 
                   return (
                     <tr key={u.id} className="hover:bg-slate-50 transition">
