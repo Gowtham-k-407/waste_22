@@ -107,7 +107,7 @@ export default function VerifiedDatasetPage() {
   };
 
   const handleExport = (format: "json" | "csv") => {
-    const url = `http://localhost:8000/api/admin/dataset/export?format=${format}`;
+    const url = `${(process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api").replace(/\/$/, "")}/admin/dataset/export?format=${format}`;
     window.open(url, "_blank");
   };
 
