@@ -10,6 +10,7 @@ from app.models.upload import Upload, DatasetImage
 from app.models.ai_model import AIModelVersion, TrainingJob
 from app.models.dataset import DatasetSource, DatasetImport
 from app.models.optimization import EnvironmentalMetric, OperationalAlert, OptimizationRecommendation
+from app.models.iot import IoTDevice, DeviceTelemetry
 
 __all__ = [
     "User",
@@ -32,4 +33,6 @@ __all__ = [
     "EnvironmentalMetric",
     "OperationalAlert",
     "OptimizationRecommendation",
+    "IoTDevice",
+    "DeviceTelemetry"
 ]

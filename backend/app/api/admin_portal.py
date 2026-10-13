@@ -660,6 +660,16 @@ def activate_model(
     if not target:
         raise HTTPException(status_code=404, detail="Model version not found.")
 
+    from app.services.ai_vision_service import AIVisionService
+    from app.core.config import settings
+    checkpoint_file = target.weights_path or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
+    weights_to_use = checkpoint_file if os.path.exists(checkpoint_file) else None
+    
+    # Actually switch active neural inference model weights
+    switch_ok = AIVisionService.switch_active_model(target.version, weights_path=weights_to_use)
+    if not switch_ok:
+        raise HTTPException(status_code=500, detail=f"Failed to load weights for model version {target.version}.")
+
     # Mark all other models as inactive / archived
     db.query(AIModelVersion).filter(AIModelVersion.id != model_id).update(
         {"is_active_production": False, "status": "archived"}, synchronize_session=False
@@ -671,7 +681,7 @@ def activate_model(
 
     return {
         "success": True,
-        "message": f"Model {target.version} ('{target.model_name}') is now the ACTIVE production model.",
+        "message": f"Model {target.version} ('{target.model_name}') is now the ACTIVE production model with verified weights.",
         "active_model": {
             "version": target.version,
             "name": target.model_name,

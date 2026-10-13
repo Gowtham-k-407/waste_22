@@ -17,6 +17,7 @@ class Upload(Base):
     image_url = Column(String, nullable=False)
     file_size_bytes = Column(Integer, default=0)
     mime_type = Column(String, default="image/jpeg")
+    content_hash = Column(String, nullable=True, index=True)
 
     # User-provided metadata
     category = Column(String, default="Unknown") # User category selection
@@ -43,6 +44,10 @@ class Upload(Base):
     rejection_reason = Column(String, nullable=True)
     admin_notes = Column(Text, nullable=True)
 
+    # Provenance tracking
+    source_provenance = Column(String, default="Citizen WebCam Contribution")
+    license = Column(String, default="Creative Commons CC-BY 4.0")
+
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     verified_at = Column(DateTime, nullable=True)
 
@@ -56,8 +61,9 @@ class DatasetImage(Base):
 
     image_url = Column(String, nullable=False)
     stored_image_path = Column(String, nullable=True)
+    content_hash = Column(String, nullable=True, index=True)
     
-    # Standard Categories: Plastic, Paper, Metal, Glass, Organic Waste, E-Waste, Battery, Mobile Phone, Electronic Components, Other Waste
+    # Standard Categories: Plastic, Paper, Metal, Glass, Organic Waste, E-Waste, Cardboard, Food Waste, Textile Waste, Hazardous Waste, Mixed Waste
     waste_category = Column(String, index=True, nullable=False)
     object_label = Column(String, nullable=False) # e.g. Smartphone, Li-ion Battery, PET Bottle
     description = Column(Text, nullable=True)
@@ -67,4 +73,7 @@ class DatasetImage(Base):
     verified_by = Column(String, default="System Administrator")
     verified_at = Column(DateTime, default=datetime.utcnow)
     used_in_training = Column(Boolean, default=False, index=True)
+    
+    source_provenance = Column(String, default="Verified Municipal Dataset Hub")
+    license = Column(String, default="Open Data License (ODbL) / CC-BY 4.0")
     created_at = Column(DateTime, default=datetime.utcnow)

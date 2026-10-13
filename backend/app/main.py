@@ -14,8 +14,9 @@ from app.api import (
     vehicles, detections, contributions,
     training, models, datasets, optimization,
     alerts, environmental, simulation, memory,
-    uploads, admin_portal
+    uploads, admin_portal, iot
 )
+from app.services.mqtt_service import start_mqtt_client_if_configured
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -27,9 +28,12 @@ try:
 finally:
     db.close()
 
+# Start background MQTT client if broker is configured
+start_mqtt_client_if_configured()
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.1.0",
+    version="2.2.0",
     description="Automated Solid Waste Segregation & AI Model Continuous Improvement Dashboard for Municipal Recycling Plants (Greater Chennai Corporation)"
 )
 
@@ -65,6 +69,7 @@ app.include_router(simulation.router, prefix=settings.API_V1_STR)
 app.include_router(memory.router, prefix=settings.API_V1_STR)
 app.include_router(uploads.router, prefix=settings.API_V1_STR)
 app.include_router(admin_portal.router, prefix=settings.API_V1_STR)
+app.include_router(iot.router, prefix=settings.API_V1_STR)
 
 from fastapi import UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -94,6 +99,9 @@ async def detect_frame_with_active_model(
     active_model = db.query(AIModelVersion).filter(AIModelVersion.is_active_production == True).first()
     if not active_model:
         active_model = db.query(AIModelVersion).order_by(AIModelVersion.id.desc()).first()
+
+    if active_model and AIVisionService._active_version != active_model.version:
+        AIVisionService.switch_active_model(active_model.version)
 
     analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename or "")
 
@@ -153,14 +161,27 @@ async def detect_frame_with_active_model(
 
 
 @app.get("/api/health")
-def health_check():
+def health_check(db: Session = Depends(get_db)):
+    from app.core.database import check_database_health
+    db_health = check_database_health()
+    active_model = db.query(AIModelVersion).filter(AIModelVersion.is_active_production == True).first()
     return {
-        "status": "healthy",
+        "status": "healthy" if db_health.get("healthy") else "degraded",
         "service": settings.PROJECT_NAME,
         "city": "Chennai, Tamil Nadu",
+        "database": db_health,
+        "active_model": {
+            "version": active_model.version if active_model else "v2.1",
+            "name": active_model.model_name if active_model else "GCC-WasteVision",
+            "status": "Production"
+        },
+        "storage": {
+            "provider": settings.STORAGE_PROVIDER,
+            "bucket": settings.STORAGE_BUCKET if settings.STORAGE_PROVIDER == "s3" else "local_disk"
+        },
         "zones_count": 15,
         "wards_count": 200,
-        "version": "2.1.0"
+        "version": "2.2.0"
     }
 
 # Friendly global error handler for non-technical users
