@@ -337,6 +337,31 @@ export const api = {
     }),
   getActiveAdminModel: () => fetchApi<any>("/admin/models/active"),
 
+  // Admin User Directory & Role Management
+  getAdminUsers: (params?: { q?: string; role?: string; status?: string; page?: number; limit?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.q) sp.append("q", params.q);
+    if (params?.role && params.role !== "all") sp.append("role", params.role);
+    if (params?.status && params.status !== "all") sp.append("status", params.status);
+    if (params?.page) sp.append("page", params.page.toString());
+    if (params?.limit) sp.append("limit", params.limit.toString());
+    const query = sp.toString() ? `?${sp.toString()}` : "";
+    return fetchApi<any>(`/admin/users${query}`);
+  },
+  getAdminUserDetail: (userId: number) => fetchApi<any>(`/admin/users/${userId}`),
+  updateUserRole: (userId: number, data: { role: string; reason?: string }) =>
+    fetchApi<any>(`/admin/users/${userId}/role`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  getAdminRoles: () => fetchApi<any[]>("/admin/roles"),
+  restoreSession: () =>
+    fetchApi<any>("/auth/restore-session", {
+      method: "POST",
+    }),
+
+
   // Direct Live Webcam Detection using Active Model
   detectWebcamFrame: (formData: FormData) =>
     fetchApi<any>("/detect", {

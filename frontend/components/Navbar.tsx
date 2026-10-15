@@ -36,7 +36,7 @@ const ROLE_LABELS: Record<string, { title: string; color: string }> = {
 };
 
 export function Navbar({ onToggleSidebar }: NavbarProps) {
-  const { user, isAuthenticated, logout, switchRole } = useAuth();
+  const { user, isAuthenticated, logout, switchRole, restoreSession } = useAuth();
   const [simulationMode, setSimulationMode] = useState(false);
   const [alertCount, setAlertCount] = useState(5);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
@@ -75,7 +75,15 @@ export function Navbar({ onToggleSidebar }: NavbarProps) {
 
   const handleRoleChange = async (newRole: string) => {
     try {
-      await switchRole(newRole);
+      if (newRole === "system_admin") {
+        try {
+          await restoreSession();
+        } catch {
+          await switchRole(newRole);
+        }
+      } else {
+        await switchRole(newRole);
+      }
       setUserDropdownOpen(false);
     } catch (e) {
       console.error(e);

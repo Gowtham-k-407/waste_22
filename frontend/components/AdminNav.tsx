@@ -12,7 +12,8 @@ import {
   ShieldCheck,
   Sparkles,
   RefreshCw,
-  LogOut
+  LogOut,
+  Users
 } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -43,6 +44,11 @@ export function AdminNav({ pendingCount }: { pendingCount?: number }) {
   }, []);
 
   const navItems = [
+    {
+      href: "/admin/users",
+      label: "User Directory & Roles",
+      icon: Users,
+    },
     {
       href: "/admin",
       label: "Verification Queue",

@@ -1,3 +1,4 @@
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -339,6 +340,7 @@ def switch_user_role(
     """
     Role switching is strictly validated against server-side eligibility:
     - System Administrators can preview any role or return to system_admin.
+    - Permanent role assignment is preserved so administrators are never locked out.
     - Staff members can switch only to their assigned server-side role, or public/contributor modes.
     - Public/contributor users cannot self-escalate to any municipal staff or administrative role.
     Upon successful role change, a freshly signed session JWT with the updated role is issued.
@@ -347,12 +349,29 @@ def switch_user_role(
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
+    # Inspect preferences_json for permanent_role
+    prefs = {}
+    if current_user.preferences_json:
+        try:
+            prefs = json.loads(current_user.preferences_json)
+        except Exception:
+            prefs = {}
+
     # Check server-side staff profile assignment
     staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
 
-    # Determine permitted roles for this user
-    if current_user.role == "system_admin" or (staff_profile and staff_profile.role_code == "system_admin"):
-        # System Admin has global test switching capabilities
+    # If user.role was already system_admin, record it in preferences_json if missing
+    if current_user.role == "system_admin" and prefs.get("permanent_role") != "system_admin":
+        prefs["permanent_role"] = "system_admin"
+
+    is_system_admin = (
+        current_user.role == "system_admin"
+        or prefs.get("permanent_role") == "system_admin"
+        or (staff_profile and staff_profile.role_code == "system_admin")
+    )
+
+    if is_system_admin:
+        # System Admin has global test switching capabilities and can return to system_admin
         pass
     elif staff_profile:
         # User is an authorized staff member; they can switch between their assigned role and citizen modes
@@ -371,6 +390,8 @@ def switch_user_role(
                 detail=f"Privilege escalation prohibited: Role '{req.role}' requires municipal verification. Public users cannot self-assign staff or admin roles."
             )
 
+    prefs["active_persona"] = req.role
+    current_user.preferences_json = json.dumps(prefs)
     current_user.role = req.role
     current_user.updated_at = datetime.now(timezone.utc)
     user_db.commit()
@@ -391,3 +412,52 @@ def switch_user_role(
         "user": current_user,
         "message": f"Active role updated to {req.role}"
     }
+
+@router.post("/restore-session")
+def restore_session_role(
+    current_user: User = Depends(get_current_user_from_token),
+    staff_db: Session = Depends(get_staff_db),
+    user_db: Session = Depends(get_user_db)
+):
+    """
+    Safely restore active session role to the user's authoritative permanent role.
+    Verifies that the user has verified permanent admin or staff rights.
+    """
+    prefs = {}
+    if current_user.preferences_json:
+        try:
+            prefs = json.loads(current_user.preferences_json)
+        except Exception:
+            prefs = {}
+
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
+
+    # Determine verified permanent role
+    target_role = prefs.get("permanent_role") or (staff_profile.role_code if staff_profile else current_user.role)
+
+    # If current_user.role is already system_admin, target is system_admin
+    if current_user.role == "system_admin":
+        target_role = "system_admin"
+
+    current_user.role = target_role
+    if "active_persona" in prefs:
+        del prefs["active_persona"]
+    current_user.preferences_json = json.dumps(prefs) if prefs else None
+    current_user.updated_at = datetime.now(timezone.utc)
+    user_db.commit()
+    user_db.refresh(current_user)
+
+    new_token = create_access_token({"sub": current_user.email, "role": current_user.role, "name": current_user.full_name})
+    audit = AuthAuditLog(user_id=current_user.id, action=f"session_restored_to_permanent_role_{target_role}")
+    user_db.add(audit)
+    user_db.commit()
+
+    return {
+        "success": True,
+        "access_token": new_token,
+        "token_type": "bearer",
+        "active_role": target_role,
+        "user": current_user,
+        "message": f"Active session restored to verified permanent role '{target_role}'."
+    }
+

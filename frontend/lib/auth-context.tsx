@@ -31,6 +31,7 @@ interface AuthContextType {
   logout: () => void;
   updateProfile: (data: { full_name?: string; organization?: string; city?: string }) => Promise<User>;
   switchRole: (newRole: string) => Promise<void>;
+  restoreSession: () => Promise<void>;
   refreshUser: () => Promise<void>;
   hasRole: (allowedRoles: string | string[]) => boolean;
 }
@@ -129,6 +130,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const restoreSession = async (): Promise<void> => {
+    try {
+      const resp = await api.restoreSession();
+      if (resp && resp.user) {
+        setUser(resp.user);
+        localStorage.setItem("wastevision_user", JSON.stringify(resp.user));
+        if (resp.access_token) {
+          setToken(resp.access_token);
+          localStorage.setItem("wastevision_token", resp.access_token);
+        }
+      }
+    } catch (e: any) {
+      console.error("Failed to restore session on server:", e);
+      throw e;
+    }
+  };
+
   const refreshUser = async () => {
     try {
       const currentUser = await api.getCurrentUser();
@@ -164,6 +182,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         logout,
         updateProfile,
         switchRole,
+        restoreSession,
         refreshUser,
         hasRole,
       }}

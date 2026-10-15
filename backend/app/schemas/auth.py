@@ -75,3 +75,46 @@ class ContributorStatsResponse(BaseModel):
     eco_points: int
     badges: List[str]
     recent_uploads: List[Any] = []
+
+class UserAdminDetailResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: str
+    role: str
+    organization: Optional[str] = None
+    city: Optional[str] = None
+    phone_number: Optional[str] = None
+    is_active: bool
+    email_verified: bool
+    must_change_password: bool = False
+    contribution_points: int = 0
+    badges: str = "Eco Citizen"
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
+    assigned_ward: Optional[int] = None
+    staff_profile: Optional[dict] = None
+
+    class Config:
+        from_attributes = True
+
+class UserListResponse(BaseModel):
+    items: List[UserAdminDetailResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+
+class UserRoleUpdateRequest(BaseModel):
+    role: str
+    reason: Optional[str] = None
+
+class RoleDefinitionResponse(BaseModel):
+    role: str
+    title: str
+    department: str
+    scope: Optional[str] = None
+    description: Optional[str] = None
+    is_staff: bool = False
+    is_admin: bool = False

@@ -27,7 +27,8 @@ import {
   Sparkles,
   ShieldCheck,
   Layers,
-  BookmarkCheck
+  BookmarkCheck,
+  Users
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth-context";
@@ -102,6 +103,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     {
       title: "Admin & AI Governance",
       items: [
+        { name: "User Directory & Roles", href: "/admin/users", icon: Users, badge: "RBAC" },
         { name: "Admin Verification Queue", href: "/admin", icon: ShieldCheck, badge: "Admin" },
         { name: "Verified Dataset Hub", href: "/admin/dataset", icon: Layers },
         { name: "Model Registry & Rollback", href: "/admin/models", icon: BookmarkCheck },

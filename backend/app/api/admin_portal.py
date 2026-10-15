@@ -2,11 +2,13 @@ import os
 import io
 import csv
 import json
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Security, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
 from pydantic import BaseModel
 
 from app.core.database import get_db, get_user_db, get_waste_db, get_staff_db
@@ -18,6 +20,10 @@ from app.models.staff import StaffProfile, StaffDutyAssignment, StaffAuditLog
 from app.models.upload import Upload, DatasetImage
 from app.models.ai_model import AIModelVersion, TrainingJob
 from app.services.training_worker import ModelTrainingService, get_next_model_version
+from app.schemas.auth import (
+    UserAdminDetailResponse, UserListResponse, UserRoleUpdateRequest, RoleDefinitionResponse
+)
+from app.api.auth import MUNICIPAL_STAFF_ROLES
 
 router = APIRouter(prefix="/admin", tags=["Municipal Admin Portal & Model Training"])
 
@@ -717,3 +723,292 @@ def get_active_model(db: Session = Depends(get_db)):
         "f1_score": model.f1_score if model else 0.905,
         "is_active": True
     }
+
+
+# =========================================================================
+# 5. USER DIRECTORY & ROLE MANAGEMENT
+# =========================================================================
+
+def _serialize_user_admin_view(u: User, staff_profile: Optional[StaffProfile] = None) -> dict:
+    staff_dict = None
+    if staff_profile:
+        staff_dict = {
+            "employee_id": staff_profile.employee_id,
+            "job_title": staff_profile.job_title,
+            "role_code": staff_profile.role_code,
+            "department": staff_profile.department,
+            "employment_status": staff_profile.employment_status,
+            "assigned_zone_number": staff_profile.assigned_zone_number,
+            "assigned_ward_number": staff_profile.assigned_ward_number,
+            "assigned_facility_name": staff_profile.assigned_facility_name,
+            "shift": staff_profile.shift,
+        }
+    return {
+        "id": u.id,
+        "username": u.username,
+        "email": u.email,
+        "full_name": u.full_name,
+        "role": u.role,
+        "organization": u.organization,
+        "city": u.city,
+        "phone_number": u.phone_number,
+        "is_active": u.is_active,
+        "email_verified": u.email_verified,
+        "must_change_password": u.must_change_password,
+        "contribution_points": u.contribution_points or 0,
+        "badges": u.badges or "Eco Citizen",
+        "created_at": u.created_at,
+        "updated_at": u.updated_at,
+        "last_login_at": u.last_login_at,
+        "assigned_ward": u.assigned_ward,
+        "staff_profile": staff_dict
+    }
+
+
+@router.get("/users", response_model=UserListResponse)
+def list_admin_users(
+    q: Optional[str] = Query(None, description="Search by username, email, or full name"),
+    role: Optional[str] = Query(None, description="Filter by role"),
+    status: Optional[str] = Query("all", description="Filter by status ('active', 'inactive', 'all')"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db),
+    staff_db: Session = Depends(get_staff_db)
+):
+    """
+    Search and list registered users with pagination and server-side filtering.
+    Only authorized administrators can access the directory.
+    Returns safe fields only (never secrets, password hashes, or auth tokens).
+    """
+    query = user_db.query(User)
+
+    if q and q.strip():
+        search_term = f"%{q.strip().lower()}%"
+        query = query.filter(
+            or_(
+                func.lower(User.username).like(search_term),
+                func.lower(User.email).like(search_term),
+                func.lower(User.full_name).like(search_term)
+            )
+        )
+
+    if role and role.strip() and role != "all":
+        query = query.filter(User.role == role.strip())
+
+    if status == "active":
+        query = query.filter(User.is_active == True)
+    elif status == "inactive":
+        query = query.filter(User.is_active == False)
+
+    total = query.count()
+    total_pages = max(1, math.ceil(total / limit))
+    offset = (page - 1) * limit
+    users = query.order_by(User.id.asc()).offset(offset).limit(limit).all()
+
+    # Pre-fetch staff profiles for the users
+    user_ids = [u.id for u in users]
+    staff_profiles = {
+        sp.user_id: sp for sp in staff_db.query(StaffProfile).filter(StaffProfile.user_id.in_(user_ids)).all()
+    } if user_ids else {}
+
+    items = [_serialize_user_admin_view(u, staff_profiles.get(u.id)) for u in users]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
+
+
+@router.get("/users/{user_id}", response_model=UserAdminDetailResponse)
+def get_admin_user_detail(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db),
+    staff_db: Session = Depends(get_staff_db)
+):
+    """
+    View an individual user's administrative profile and account status.
+    """
+    target_user = user_db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found."
+        )
+
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == target_user.id).first()
+    return _serialize_user_admin_view(target_user, staff_profile)
+
+
+@router.put("/users/{user_id}/role")
+def update_user_role(
+    user_id: int,
+    req: UserRoleUpdateRequest,
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db),
+    staff_db: Session = Depends(get_staff_db)
+):
+    """
+    Assign or update a user's persistent role.
+    Safeguards:
+    - Only authorized System Administrators can modify roles.
+    - Prevents self-modification to avoid accidental admin lockout.
+    - Protects the last authorized administrator against removal.
+    - Validates target role against official project role catalog.
+    - Synchronizes staff profile if linked in Database B.
+    - Creates an immutable audit record in auth_audit_logs.
+    """
+    if admin.role != "system_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Role modification requires authorized System Administrator privileges."
+        )
+
+    target_user = user_db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} does not exist."
+        )
+
+    # Protect against accidental self-lockout
+    if admin.id == target_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Self-role modification is prohibited. Administrators cannot alter their own account role via User Directory."
+        )
+
+    # Validate target role
+    valid_roles = set(MUNICIPAL_STAFF_ROLES.keys()).union({
+        "system_admin", "ai_admin", "municipal_officer", "plant_operator",
+        "waste_processing_plant_operator", "contributor", "public"
+    })
+    target_role = req.role.strip()
+    if target_role not in valid_roles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{req.role}'. Must be a recognized municipal staff or platform role."
+        )
+
+    # Protect against accidental removal of the last authorized administrator
+    if target_user.role == "system_admin" and target_role != "system_admin":
+        active_admin_count = user_db.query(User).filter(
+            User.role == "system_admin",
+            User.is_active == True
+        ).count()
+        if active_admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Safety restriction: Cannot remove or demote the last remaining active System Administrator."
+            )
+
+    old_role = target_user.role
+    target_user.role = target_role
+    target_user.updated_at = datetime.now(timezone.utc)
+
+    # Update permanent_role in preferences_json
+    target_prefs = {}
+    if target_user.preferences_json:
+        try:
+            target_prefs = json.loads(target_user.preferences_json)
+        except Exception:
+            target_prefs = {}
+    target_prefs["permanent_role"] = target_role
+    target_user.preferences_json = json.dumps(target_prefs)
+
+    user_db.commit()
+    user_db.refresh(target_user)
+
+    # Synchronize with staff_profiles if applicable
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == target_user.id).first()
+    if staff_profile and target_role in MUNICIPAL_STAFF_ROLES:
+        staff_profile.role_code = target_role
+        staff_profile.updated_at = datetime.now(timezone.utc)
+        staff_db.commit()
+
+    # Record in audit log
+    audit_entry = AuthAuditLog(
+        user_id=target_user.id,
+        action=f"role_change:admin={admin.email}:target={target_user.email}:from={old_role}:to={target_role}:reason={req.reason or 'Administrative update'}:outcome=success"
+    )
+    user_db.add(audit_entry)
+    user_db.commit()
+
+    return {
+        "success": True,
+        "message": f"Successfully updated role for user '{target_user.username}' from '{old_role}' to '{target_role}'.",
+        "user": _serialize_user_admin_view(target_user, staff_profile)
+    }
+
+
+@router.get("/roles", response_model=List[RoleDefinitionResponse])
+def get_role_definitions(admin: User = Depends(require_admin)):
+    """
+    Catalog of all official project roles, titles, departments, and scopes.
+    """
+    roles_catalog = [
+        {
+            "role": "system_admin",
+            "title": "System Security Administrator",
+            "department": "GCC IT & Cybersecurity Division",
+            "scope": "Global Administrative",
+            "description": "Full access to platform administration, user management, and security settings.",
+            "is_staff": False,
+            "is_admin": True
+        },
+        {
+            "role": "ai_admin",
+            "title": "AI Administrator & ML Lead",
+            "department": "Smart Waste Analytics & AI Wing",
+            "scope": "AI Governance",
+            "description": "Verification of waste images, model continuous learning, retraining, and dataset curation.",
+            "is_staff": False,
+            "is_admin": True
+        },
+        {
+            "role": "municipal_officer",
+            "title": "Municipal SWM Officer",
+            "department": "Solid Waste Management",
+            "scope": "Citywide Municipal Operations",
+            "description": "Operational coordination, ward analytics, alert escalation, and grievance oversight.",
+            "is_staff": True,
+            "is_admin": True
+        },
+        {
+            "role": "contributor",
+            "title": "Citizen Contributor",
+            "department": "Public Community",
+            "scope": "Household Area",
+            "description": "Upload waste photos, verify predictions, report sanitation grievances.",
+            "is_staff": False,
+            "is_admin": False
+        },
+        {
+            "role": "public",
+            "title": "Public Citizen",
+            "department": "Public Community",
+            "scope": "Household Area",
+            "description": "View neighborhood truck schedules, route status, and civic guides.",
+            "is_staff": False,
+            "is_admin": False
+        }
+    ]
+
+    for code, info in MUNICIPAL_STAFF_ROLES.items():
+        if code not in [r["role"] for r in roles_catalog]:
+            roles_catalog.append({
+                "role": code,
+                "title": info["title"],
+                "department": info["department"],
+                "scope": info.get("scope", "Municipal Staff"),
+                "description": f"Authorized GCC municipal employee: {info['title']}",
+                "is_staff": True,
+                "is_admin": code in ADMIN_ROLES
+            })
+
+    return roles_catalog
+
