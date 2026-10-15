@@ -72,8 +72,8 @@ DATASET_DISTRIBUTION_DATA = [
     {"class_name": "Metal Cans & Scrap", "category": "Metal", "count": 1280, "percentage": 6.9, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"},
     {"class_name": "Textile Waste", "category": "Textile Waste", "count": 820, "percentage": 4.5, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"},
     {"class_name": "Hazardous Waste", "category": "Hazardous Waste", "count": 480, "percentage": 2.6, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"},
-    {"class_name": "Mobile Phone", "category": "E-Waste", "count": 140, "percentage": 0.76, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"},
-    {"class_name": "Battery", "category": "E-Waste", "count": 95, "percentage": 0.52, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"},
+    {"class_name": "Mobile Phone", "category": "E-Waste", "count": 140, "percentage": 0.76, "min_required": 200, "is_underrepresented": True, "status": "Underrepresented"},
+    {"class_name": "Battery", "category": "E-Waste", "count": 95, "percentage": 0.52, "min_required": 200, "is_underrepresented": True, "status": "Critically Underrepresented"},
     {"class_name": "General Mixed Waste", "category": "Mixed Waste", "count": 1390, "percentage": 7.5, "min_required": 200, "is_underrepresented": False, "status": "Sufficient"}
 ]
 
@@ -158,10 +158,14 @@ class TrainingService:
 
     @staticmethod
     def get_class_distribution():
+        warnings = [
+            f"Class '{c['class_name']}' is critically underrepresented ({c['count']} < {c['min_required']} required)"
+            for c in DATASET_DISTRIBUTION_DATA if c["is_underrepresented"] or c["count"] < c["min_required"]
+        ]
         return {
             "total_images": sum(c["count"] for c in DATASET_DISTRIBUTION_DATA),
             "distribution": DATASET_DISTRIBUTION_DATA,
-            "underrepresented_warnings": []
+            "underrepresented_warnings": warnings
         }
 
     @staticmethod

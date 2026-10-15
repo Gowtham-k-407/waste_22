@@ -10,7 +10,7 @@ from PIL import Image
 from io import BytesIO
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db, get_waste_db
 from app.core.security import security_bearer, decode_access_token
 from app.models.upload import Upload
 from app.models.user import User
@@ -34,7 +34,8 @@ async def upload_user_waste_image(
     location_context: Optional[str] = Form(None),
     location: Optional[str] = Form(None),
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_waste_db)
 ):
     """
     Upload a waste image with metadata to help improve municipal AI models.
@@ -112,7 +113,7 @@ async def upload_user_waste_image(
         try:
             payload = decode_access_token(auth.credentials)
             if payload and payload.get("sub"):
-                user = db.query(User).filter(User.email == payload.get("sub")).first()
+                user = user_db.query(User).filter(User.email == payload.get("sub")).first()
                 if user:
                     user_id = user.id
                     user_name = user.full_name or user.username
@@ -187,10 +188,11 @@ async def upload_user_waste_image(
 def get_user_uploads(
     status_filter: Optional[str] = None,
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_waste_db)
 ):
     """
-    Retrieve list of uploaded images.
+    Retrieve list of uploaded images from Database C.
     If authenticated, returns user's uploads. If admin, returns all or user's.
     """
     query = db.query(Upload)
@@ -199,7 +201,7 @@ def get_user_uploads(
     if auth and auth.credentials:
         payload = decode_access_token(auth.credentials)
         if payload and payload.get("sub"):
-            current_user = db.query(User).filter(User.email == payload.get("sub")).first()
+            current_user = user_db.query(User).filter(User.email == payload.get("sub")).first()
 
     # If not admin, restrict to current user's uploads
     if current_user and current_user.role not in ["ai_admin", "system_admin", "municipal_officer"]:

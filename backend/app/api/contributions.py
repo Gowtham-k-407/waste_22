@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db, get_waste_db
 from app.core.config import settings
 from app.core.security import security_bearer, decode_access_token
 from app.models.contribution import ImageContribution
@@ -127,7 +127,8 @@ def confirm_and_submit(
     contributor_name: str = Form("Citizen Volunteer"),
     add_to_personal_memory: bool = Form(False),
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_waste_db)
 ):
     """
     Step 3, 4 & 5: User confirms or corrects label -> record stored in candidate dataset.
@@ -164,25 +165,26 @@ def confirm_and_submit(
         data_type="USER-CONTRIBUTED DATA"
     )
     db.add(contrib)
+    db.commit()
 
-    # Award contribution points to logged in user or admin
+    # Award contribution points to logged in user or admin in Database A
     current_user = None
     if auth and auth.credentials:
         payload = decode_access_token(auth.credentials)
         if payload and payload.get("sub"):
-            current_user = db.query(User).filter(User.email == payload.get("sub")).first()
+            current_user = user_db.query(User).filter(User.email == payload.get("sub")).first()
 
     if not current_user:
-        current_user = db.query(User).filter(User.username == "admin").first()
+        current_user = user_db.query(User).filter(User.username == "admin").first()
 
     if current_user:
         current_user.contribution_points += 20 if is_user_corrected else 10
+        user_db.commit()
 
-    # If user opted to add to Personal AI Memory
+    # If user opted to add to Personal AI Memory in Database A
     memory_added = False
     if add_to_personal_memory and current_user:
         try:
-            # Generate embedding or extract
             import numpy as np
             np.random.seed(int(image_hash[:8], 16) % 100000)
             simulated_vec = np.random.normal(0, 1, 128)
@@ -200,9 +202,11 @@ def confirm_and_submit(
                 reference_status="active",
                 notes=user_notes or f"Saved by {current_user.full_name}"
             )
-            db.add(ref)
+            user_db.add(ref)
+            user_db.commit()
             memory_added = True
         except Exception as e:
+            logger.warning(f"Failed to add personal memory: {e}")
             print("Failed to auto-add to personal memory:", e)
 
     db.commit()

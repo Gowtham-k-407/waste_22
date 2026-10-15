@@ -1,14 +1,40 @@
+import os
 import json
+import sqlite3
 import random
-from datetime import datetime, timedelta
+import uuid
+import logging
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+from app.core.config import settings
 from app.core.security import hash_password
-from app.models import (
-    User, Zone, Ward, WasteCategory, SegregationPlant,
-    CollectionVehicle, AIDetection, ImageContribution,
-    AIModelVersion, TrainingJob, DatasetSource,
-    EnvironmentalMetric, OperationalAlert, OptimizationRecommendation
+from app.core.database import (
+    user_engine, staff_engine, waste_engine,
+    UserSessionLocal, StaffSessionLocal, WasteSessionLocal,
+    UserBase, StaffBase, WasteBase
 )
+from app.core.rbac import MUNICIPAL_STAFF_ROLES
+from app.models.user import User, PasswordResetToken, AuthAuditLog
+from app.models.staff import StaffProfile, StaffDutyAssignment, StaffAuditLog
+from app.models.geography import Zone, Ward
+from app.models.waste import WasteCategory, WasteRecord
+from app.models.facility import SegregationPlant
+from app.models.vehicle import CollectionVehicle
+from app.models.detection import AIDetection
+from app.models.contribution import ImageContribution
+from app.models.upload import Upload, DatasetImage
+from app.models.ai_model import AIModelVersion, TrainingJob
+from app.models.dataset import DatasetSource, DatasetImport
+from app.models.optimization import EnvironmentalMetric, OperationalAlert, OptimizationRecommendation
+from app.models.iot import IoTDevice, DeviceTelemetry
+from app.models.complaint import (
+    PublicComplaint, ComplaintFollowUp, Notification,
+    WeighbridgeRecord, SimulationRun, AIInferenceAudit
+)
+
+logger = logging.getLogger("wastedash.seed")
 
 CHENNAI_ZONES = [
     (1, "Thiruvottiyur", "Tollgate, Thiruvottiyur High Road"),
@@ -57,75 +83,199 @@ PLANTS_DATA = [
     ("Valasaravakkam Micro Processing Plant", "Micro Segregation Plant", 11, 148, 13.0425, 80.1740, 40.0, 12.0, "maintenance", "Organic,Plastic,Cardboard", "GCC Zone 11 SWM", "+91 44 2486 9911", "Arcot Road, Valasaravakkam, Chennai")
 ]
 
-def seed_database(db: Session):
-    # Check if already seeded
-    if db.query(Zone).count() > 0:
+WARD_NAMES = [
+    "Tollgate", "Ernavoor", "Kathivakkam", "Sathangadu", "Chinnasekkadu", "Manali New Town",
+    "Madhavaram Central", "Moolakadai", "Vyasarpadi", "Tondiarpet East", "Old Washermanpet",
+    "Royapuram Harbor", "Sowcarpet", "Chintadripet", "Otteri", "Purasawalkam", "Perambur",
+    "Kolathur", "Villivakkam", "Ambattur Industrial", "Korattur Lake", "Anna Nagar Tower",
+    "Shenoy Nagar", "Aminjikarai", "Chetpet", "Nungambakkam", "T. Nagar Panagal Park",
+    "Teynampet", "Alwarpet", "Mylapore", "Triplicane", "Royapettah", "Kodambakkam",
+    "Vadapalani", "Ashok Nagar", "KK Nagar", "Valasaravakkam", "Virugambakkam", "Porur",
+    "Ramapuram", "Alandur Metro", "Guindy", "St. Thomas Mount", "Adyar", "Besant Nagar",
+    "Thiruvanmiyur", "Kotturpuram", "Perungudi OMR", "Thoraipakkam", "Palavakkam",
+    "Neelankarai", "Sholinganallur", "Semmancheri", "Uthandi"
+]
+
+def init_all_tables():
+    """Ensure tables are created independently in all three databases."""
+    logger.info("Initializing tables in Database A (Users), Database B (Staff), and Database C (Waste Operations)...")
+    UserBase.metadata.create_all(bind=user_engine)
+    StaffBase.metadata.create_all(bind=staff_engine)
+    WasteBase.metadata.create_all(bind=waste_engine)
+
+def seed_database_a(user_db: Session):
+    """Seed Database A: Users and Authentication."""
+    # 1. Bootstrap Admin account requested: admin@wastesegeregate.in / admin123
+    bootstrap_email = settings.ADMIN_BOOTSTRAP_EMAIL.lower()
+    existing_bootstrap = user_db.query(User).filter(User.email == bootstrap_email).first()
+    if not existing_bootstrap:
+        b_admin = User(
+            username="system_admin",
+            email=bootstrap_email,
+            hashed_password=hash_password(settings.ADMIN_BOOTSTRAP_PASSWORD),
+            full_name="Platform Security Administrator",
+            role="system_admin",
+            organization="Greater Chennai Corporation IT Cell",
+            city="Chennai",
+            is_active=True,
+            email_verified=True,
+            must_change_password=True, # Requires password change on initial login
+            contribution_points=5000,
+            badges="System Architect, Super Admin"
+        )
+        user_db.add(b_admin)
+        user_db.commit()
+        logger.info(f"Provisioned initial bootstrap administrator: {bootstrap_email}")
+
+    # 2. Migrate legacy users from chennai_waste.db if present
+    legacy_db_path = os.path.join(settings.BASE_DIR, "chennai_waste.db")
+    if os.path.exists(legacy_db_path):
+        try:
+            con = sqlite3.connect(legacy_db_path)
+            cur = con.cursor()
+            for row in cur.execute("SELECT username, email, hashed_password, full_name, role, organization, city, contribution_points, badges FROM users;").fetchall():
+                u_name, u_email, u_hash, u_fn, u_role, u_org, u_city, u_pts, u_bdg = row
+                if not user_db.query(User).filter(User.email == u_email).first():
+                    user_db.add(User(
+                        username=u_name,
+                        email=u_email,
+                        hashed_password=u_hash,
+                        full_name=u_fn,
+                        role=u_role,
+                        organization=u_org or "GCC",
+                        city=u_city or "Chennai",
+                        contribution_points=u_pts or 50,
+                        badges=u_bdg or "Eco Citizen",
+                        is_active=True,
+                        email_verified=True
+                    ))
+            user_db.commit()
+            con.close()
+        except Exception as e:
+            logger.warning(f"Legacy user migration notice: {e}")
+
+    # 3. Add representative staff users and public contributors
+    initial_users = [
+        User(username="admin", email="admin@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS (Municipal Commissioner)", role="system_admin", organization="Greater Chennai Corporation (GCC)", city="Chennai", contribution_points=1250, badges="Municipal Director"),
+        User(username="commissioner", email="commissioner@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS", role="municipal_commissioner", organization="Greater Chennai Corporation", city="Chennai", contribution_points=1200, badges="Municipal Commissioner"),
+        User(username="kumar_officer", email="kumar.swm@chennaiswm.gov.in", hashed_password=hash_password("Officer@123"), full_name="Er. R. Kumar", role="sanitary_officer", organization="GCC Zone 8 - Anna Nagar", city="Chennai", contribution_points=850, badges="Senior Sanitary Officer"),
+        User(username="perungudi_operator", email="operator.perungudi@chennaiswm.gov.in", hashed_password=hash_password("Operator@123"), full_name="K. Vaitheeswaran", role="waste_processing_plant_operator", organization="Perungudi SWM Processing Plant", city="Chennai", contribution_points=600, badges="Plant Operator"),
+        User(username="ai_lead", email="ai.lead@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. Ananya Natarajan", role="ai_admin", organization="IIT Madras / GCC AI Lab", city="Chennai", contribution_points=2400, badges="AI Vision Lead"),
+        User(username="citizen_priya", email="priya.chennai@gmail.com", hashed_password=hash_password("Citizen@123"), full_name="Priya Subramanian", role="contributor", organization="Chennai Green Earth Volunteers", city="Chennai", contribution_points=420, badges="Eco Citizen, Master Segregator"),
+        User(username="public_guest", email="guest@chennai.in", hashed_password=hash_password("Guest@123"), full_name="Public Resident of Chennai", role="public", organization="Chennai Resident", city="Chennai", contribution_points=50, badges="Eco Citizen")
+    ]
+    for u in initial_users:
+        if not user_db.query(User).filter(User.email == u.email).first():
+            user_db.add(u)
+    user_db.commit()
+
+def seed_database_b(staff_db: Session, user_db: Session):
+    """Seed Database B: All 35 Municipal Staff Profiles."""
+    if staff_db.query(StaffProfile).count() >= 35:
         return
 
-    print("Seeding Chennai Waste Management Platform database...")
+    logger.info("Seeding Database B with 35 GCC Municipal Staff Profiles...")
 
-    # 1. Users
-    users = [
-        User(username="admin", email="admin@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS (Municipal Commissioner)", role="system_admin", organization="Greater Chennai Corporation (GCC)", city="Chennai", contribution_points=1250, badges="Municipal Director"),
-        User(username="officer_kumar", email="kumar.swm@chennaiswm.gov.in", hashed_password=hash_password("Officer@123"), full_name="Er. R. Kumar (Executive Engineer, Zone 8)", role="municipal_officer", organization="GCC Zone 8 - Anna Nagar", city="Chennai", contribution_points=850, badges="Senior Field Officer"),
-        User(username="plant_operator", email="operator.perungudi@chennaiswm.gov.in", hashed_password=hash_password("Operator@123"), full_name="K. Vaitheeswaran (Plant Supervisor)", role="plant_operator", organization="Perungudi SWM Processing Plant", city="Chennai", contribution_points=600, badges="Plant Chief"),
-        User(username="ai_admin", email="ai.lead@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. Ananya Natarajan (Lead AI Scientist)", role="ai_admin", organization="IIT Madras / GCC AI Lab", city="Chennai", contribution_points=2400, badges="AI Vision Lead"),
-        User(username="citizen_priya", email="priya.chennai@gmail.com", hashed_password=hash_password("Citizen@123"), full_name="Priya Subramanian (Green Volunteer)", role="contributor", organization="Chennai Green Earth Citizens Club", city="Chennai", contribution_points=420, badges="Master Segregator"),
-        User(username="public_guest", email="guest@chennai.in", hashed_password=hash_password("Guest@123"), full_name="Public Guest Resident", role="public", organization="Chennai Resident", city="Chennai", contribution_points=50, badges="Eco Citizen")
-    ]
-    db.add_all(users)
-    db.commit()
+    # Ensure users exist in Database A for linking
+    role_specs = list(MUNICIPAL_STAFF_ROLES.items())
+    for idx, (role_code, meta) in enumerate(role_specs, start=1):
+        emp_code = f"GCC-EMP-{idx:03d}"
+        existing = staff_db.query(StaffProfile).filter(StaffProfile.employee_id == emp_code).first()
+        if existing:
+            continue
 
-    # 2. Zones
+        staff_email = f"staff.{role_code}@chennaiswm.gov.in"
+        u = user_db.query(User).filter(User.email == staff_email).first()
+        if not u:
+            u = User(
+                username=f"staff_{role_code[:15]}_{idx}",
+                email=staff_email,
+                hashed_password=hash_password("Staff@123"),
+                full_name=f"{meta['title']} Staff Official",
+                role=role_code,
+                organization=f"GCC - {meta['department']}",
+                city="Chennai",
+                is_active=True,
+                email_verified=True,
+                must_change_password=False
+            )
+            user_db.add(u)
+            user_db.commit()
+            user_db.refresh(u)
+
+        # Assign realistic zone, ward, or facility based on role scope
+        zone_num = (idx % 15) + 1
+        ward_num = ((idx * 5) % 200) + 1
+        facility_idx = (idx % len(PLANTS_DATA))
+        facility_name = PLANTS_DATA[facility_idx][0]
+
+        profile = StaffProfile(
+            user_id=u.id,
+            employee_id=emp_code,
+            full_name=u.full_name,
+            job_title=meta["title"],
+            role_code=role_code,
+            department=meta["department"],
+            assigned_zone_number=zone_num if meta["scope"] in ["zone_level", "ward_level"] else None,
+            assigned_ward_number=ward_num if meta["scope"] == "ward_level" else None,
+            assigned_facility_id=facility_idx + 1 if meta["scope"] == "facility_level" else None,
+            assigned_facility_name=facility_name if meta["scope"] == "facility_level" else None,
+            assigned_vehicle_code=f"GC-{(idx % 24) + 1:02d}" if "Driver" in meta["title"] or "Vehicle" in meta["title"] else None,
+            phone_number=f"+91 44 2538 {1000 + idx}",
+            shift="Morning (06:00 - 14:00)" if idx % 2 == 0 else "General (09:00 - 17:30)",
+            employment_status="Active"
+        )
+        staff_db.add(profile)
+        staff_db.commit()
+
+        # Add initial duty assignment
+        duty = StaffDutyAssignment(
+            staff_id=profile.id,
+            duty_date=datetime.now(timezone.utc),
+            shift=profile.shift,
+            task_description=f"Operational Duty: {meta['title']} for {meta['department']}",
+            ward_number=profile.assigned_ward_number,
+            facility_name=profile.assigned_facility_name,
+            status="In Progress"
+        )
+        staff_db.add(duty)
+        staff_db.commit()
+
+def seed_database_c(waste_db: Session):
+    """Seed Database C: Waste Operations, Geography, Vehicles, Plants, AI, and Grievances."""
+    # Check if geography already seeded
+    if waste_db.query(Zone).count() > 0:
+        return
+
+    logger.info("Seeding Database C with Zones, 200 Wards, Facilities, Fleet, AI, and Grievance Data...")
+
+    # 1. 15 Zones
     zone_objs = {}
     for z_no, z_name, z_hq in CHENNAI_ZONES:
         z = Zone(zone_number=z_no, name=z_name, headquarters=z_hq)
-        db.add(z)
-        db.commit()
+        waste_db.add(z)
+        waste_db.commit()
         zone_objs[z_no] = z
 
-    # 3. Wards 1 to 200 with realistic distribution
-    # Center latitudes: Zone 1 (13.16), Zone 5 (13.10), Zone 8 (13.08), Zone 9 (13.04), Zone 13 (12.99), Zone 15 (12.90)
-    # Longitudes: 80.14 (West) to 80.29 (Coast)
-    ward_names = [
-        "Tollgate", "Ernavoor", "Kathivakkam", "Sathangadu", "Chinnasekkadu", "Manali New Town",
-        "Madhavaram Central", "Moolakadai", "Vyasarpadi", "Tondiarpet East", "Old Washermanpet",
-        "Royapuram Harbor", "George Town North", "Sowcarpet", "Chintadripet", "Otteri",
-        "Purasawalkam", "Perambur Barracks", "Sembium", "Kolathur East", "Villivakkam",
-        "Ambattur Industrial", "Korattur Lake", "Padi", "Anna Nagar Tower", "Shenoy Nagar",
-        "Aminjikarai", "Thirumangalam", "Chetpet Lake", "Nungambakkam High Road", "T. Nagar Panagal Park",
-        "Teynampet Central", "Alwarpet", "Mylapore Temple Area", "Triplicane Marina", "Royapettah",
-        "Kodambakkam Power House", "Vadapalani Murugan Area", "Ashok Nagar Pillar", "KK Nagar Central",
-        "Valasaravakkam Market", "Virugambakkam", "Porur Junction", "Ramapuram", "Alandur Metro",
-        "Guindy Race Course", "St. Thomas Mount", "Adyar Kasturba Nagar", "Besant Nagar Beach",
-        "Thiruvanmiyur Temple", "Kotturpuram", "Perungudi OMR", "Kandanchavadi IT", "Thoraipakkam Toll",
-        "Palavakkam Coastal", "Neelankarai Beach", "Sholinganallur Junction", "Semmancheri", "Uthandi ECR"
-    ]
-
+    # 2. 200 Wards with realistic Chennai geographic data
     wards = []
     for w_no in range(1, 201):
-        # Determine assigned zone (approx 13-14 wards per zone)
         z_no = min(15, max(1, (w_no - 1) // 13 + 1))
         zone_ref = zone_objs[z_no]
-        
-        # Latitude interpolation from north (13.19) to south (12.87)
         lat_base = 13.18 - ((w_no - 1) / 200.0) * 0.31
         lat = round(lat_base + random.uniform(-0.012, 0.012), 4)
-        
-        # Longitude variation between 80.16 and 80.28
         lng = round(80.21 + random.uniform(-0.065, 0.065), 4)
 
-        name_idx = (w_no - 1) % len(ward_names)
-        w_name = f"{ward_names[name_idx]} (Ward {w_no})"
+        name_idx = (w_no - 1) % len(WARD_NAMES)
+        w_name = f"{WARD_NAMES[name_idx]} (Ward {w_no})"
         pop = random.randint(35000, 68000)
         daily_waste = round((pop * random.uniform(0.48, 0.62)) / 1000.0, 1)
-        
-        # Vary segregation efficiency: coastal/residential higher (60-80%), commercial/market lower (35-55%)
-        if z_no in [8, 9, 13]: # Anna Nagar, Teynampet, Adyar
+
+        if z_no in [8, 9, 13]:
             seg_eff = round(random.uniform(62.0, 84.0), 1)
             poll_risk = round(random.uniform(25.0, 48.0), 1)
             rec_pot = round(random.uniform(72.0, 89.0), 1)
-        elif z_no in [4, 5, 10]: # Tondiarpet, Royapuram, Kodambakkam (Dense commercial)
+        elif z_no in [4, 5, 10]:
             seg_eff = round(random.uniform(38.0, 58.0), 1)
             poll_risk = round(random.uniform(55.0, 85.0), 1)
             rec_pot = round(random.uniform(65.0, 78.0), 1)
@@ -156,10 +306,10 @@ def seed_database(db: Session):
         )
         wards.append(ward)
 
-    db.add_all(wards)
-    db.commit()
+    waste_db.add_all(wards)
+    waste_db.commit()
 
-    # 4. Waste Categories
+    # 3. 11 Canonical Waste Categories
     for c_name, c_col, c_rec, c_desc, c_inst in WASTE_CATEGORIES_DATA:
         cat = WasteCategory(
             name=c_name,
@@ -168,10 +318,10 @@ def seed_database(db: Session):
             description=c_desc,
             handling_instructions=c_inst
         )
-        db.add(cat)
-    db.commit()
+        waste_db.add(cat)
+    waste_db.commit()
 
-    # 5. Segregation Plants
+    # 4. 12 Segregation Plants
     for p_name, p_type, p_z, p_w, p_lat, p_lng, p_cap, p_curr, p_stat, p_acc, p_op, p_ph, p_addr in PLANTS_DATA:
         plant = SegregationPlant(
             name=p_name,
@@ -188,22 +338,21 @@ def seed_database(db: Session):
             contact_phone=p_ph,
             address=p_addr
         )
-        db.add(plant)
-    db.commit()
+        waste_db.add(plant)
+    waste_db.commit()
 
-    # 6. Smart Garbage Collection Trucks (GC-01 to GC-24)
+    # 5. 24 Smart Collection Trucks
     driver_names = [
         "M. Selvam", "R. Arumugam", "S. Murugan", "T. Vijay", "K. Anbarasan", "V. Manikandan",
         "P. Karthik", "G. Venkatesh", "B. Balaji", "D. Dinesh", "A. Jayakumar", "M. Saravanan",
         "R. Thangaraj", "S. Senthil", "C. Prakash", "E. Ramesh", "N. Suresh", "L. Natarajan",
         "K. Ravi", "J. Mohan", "V. Sridhar", "P. Ganesan", "T. Elangovan", "M. Palani"
     ]
-
     vehicles = []
     for i in range(1, 25):
         code = f"GC-{i:02d}"
         assigned_ward = random.randint(1, 200)
-        w_obj = db.query(Ward).filter(Ward.ward_number == assigned_ward).first()
+        w_obj = waste_db.query(Ward).filter(Ward.ward_number == assigned_ward).first()
         lat = w_obj.latitude + random.uniform(-0.005, 0.005) if w_obj else 13.0827
         lng = w_obj.longitude + random.uniform(-0.005, 0.005) if w_obj else 80.2707
 
@@ -223,299 +372,242 @@ def seed_database(db: Session):
             assigned_ward_id=assigned_ward,
             assigned_route=f"Sector {i} - Route {chr(65 + (i % 6))}",
             current_speed_kmh=round(random.uniform(12.0, 26.0), 1),
-            last_ping=datetime.utcnow(),
+            last_ping=datetime.now(timezone.utc),
             camera_status="Active - Streaming AI Feed"
         )
         vehicles.append(v)
+    waste_db.add_all(vehicles)
+    waste_db.commit()
 
-    db.add_all(vehicles)
-    db.commit()
-
-    # 7. AI Models
+    # 6. AI Model Registry
     models = [
         AIModelVersion(
             model_name="GCC-WasteVision-YOLO",
             version="v2.1",
             status="production",
-            framework="PyTorch 2.2 / YOLOv8x-Waste",
+            framework="PyTorch 2.2 / YOLOv8-Waste",
             accuracy=0.894,
             precision=0.882,
             recall=0.865,
             f1_score=0.871,
             training_images_count=12400,
-            training_date=datetime.utcnow() - timedelta(days=28),
+            training_date=datetime.now(timezone.utc) - timedelta(days=28),
             dataset_version="GCC-DS-2026.1",
+            is_active_production=True,
             class_metrics_json=json.dumps({
-                "Plastic": {"accuracy": 0.91, "f1": 0.89, "samples": 2400},
-                "Food Waste": {"accuracy": 0.88, "f1": 0.87, "samples": 3100},
-                "Cardboard": {"accuracy": 0.92, "f1": 0.90, "samples": 1500},
-                "Paper": {"accuracy": 0.89, "f1": 0.86, "samples": 1400},
-                "Glass": {"accuracy": 0.87, "f1": 0.85, "samples": 850},
-                "Metal": {"accuracy": 0.90, "f1": 0.88, "samples": 780},
-                "Organic Waste": {"accuracy": 0.86, "f1": 0.84, "samples": 1800},
-                "Textile Waste": {"accuracy": 0.83, "f1": 0.81, "samples": 420},
-                "Electronic Waste": {"accuracy": 0.85, "f1": 0.83, "samples": 350},
-                "Hazardous Waste": {"accuracy": 0.88, "f1": 0.86, "samples": 200},
-                "Mixed Waste": {"accuracy": 0.80, "f1": 0.78, "samples": 600}
-            }),
-            notes="Current Production model deployed on municipal collection fleet smart cameras.",
-            is_active_production=True
+                "Plastic": {"accuracy": 0.91, "f1": 0.89},
+                "Organic Waste": {"accuracy": 0.86, "f1": 0.84},
+                "E-Waste": {"accuracy": 0.85, "f1": 0.83}
+            })
         ),
         AIModelVersion(
-            model_name="GCC-WasteVision-YOLO",
-            version="v2.2",
+            model_name="GCC-WasteVision-MobileNet",
+            version="v2.2-candidate",
             status="candidate",
-            framework="PyTorch 2.2 / YOLOv8x-Waste",
-            accuracy=0.921,
-            precision=0.915,
-            recall=0.908,
-            f1_score=0.914,
-            training_images_count=12900,
-            training_date=datetime.utcnow() - timedelta(days=2),
-            dataset_version="GCC-DS-2026.2-Candidate",
-            class_metrics_json=json.dumps({
-                "Plastic": {"accuracy": 0.94, "f1": 0.93, "samples": 2550},
-                "Food Waste": {"accuracy": 0.91, "f1": 0.90, "samples": 3220},
-                "Cardboard": {"accuracy": 0.95, "f1": 0.93, "samples": 1580},
-                "Paper": {"accuracy": 0.91, "f1": 0.89, "samples": 1460},
-                "Glass": {"accuracy": 0.89, "f1": 0.88, "samples": 890},
-                "Metal": {"accuracy": 0.93, "f1": 0.92, "samples": 810},
-                "Organic Waste": {"accuracy": 0.89, "f1": 0.88, "samples": 1920},
-                "Textile Waste": {"accuracy": 0.87, "f1": 0.85, "samples": 460},
-                "Electronic Waste": {"accuracy": 0.88, "f1": 0.87, "samples": 380},
-                "Hazardous Waste": {"accuracy": 0.91, "f1": 0.90, "samples": 220},
-                "Mixed Waste": {"accuracy": 0.83, "f1": 0.82, "samples": 610}
-            }),
-            notes="Candidate model retrained with +500 community verified citizen photos and camera annotations. Ready for Admin approval.",
+            framework="PyTorch 2.2 / MobileNetV3-Waste",
+            accuracy=0.923,
+            precision=0.918,
+            recall=0.912,
+            f1_score=0.915,
+            training_images_count=16500,
+            training_date=datetime.now(timezone.utc) - timedelta(days=2),
+            dataset_version="GCC-DS-2026.2",
             is_active_production=False
+        )
+    ]
+    waste_db.add_all(models)
+    waste_db.commit()
+
+    # 7. Realistic Synthetic Waste Operations Records (Labeled Provenance)
+    simulation_run_id = "GCC-INIT-SEED-2026"
+    now = datetime.now(timezone.utc)
+    waste_records = []
+    for d in range(14, 0, -1):
+        record_date = now - timedelta(days=d)
+        for w_id in [102, 105, 82, 85, 112, 114, 170, 175, 32, 38]:
+            waste_records.append(WasteRecord(
+                ward_id=w_id,
+                category_id=1, # Organic
+                quantity_kg=round(random.uniform(1200.0, 3400.0), 1),
+                segregation_status="Segregated",
+                timestamp=record_date,
+                data_source="simulation",
+                data_type="SIMULATED DATA"
+            ))
+            waste_records.append(WasteRecord(
+                ward_id=w_id,
+                category_id=3, # Plastic
+                quantity_kg=round(random.uniform(300.0, 950.0), 1),
+                segregation_status="Segregated",
+                timestamp=record_date,
+                data_source="simulation",
+                data_type="SIMULATED DATA"
+            ))
+    waste_db.add_all(waste_records)
+    waste_db.commit()
+
+    # 8. Weighbridge Records at Processing Facilities
+    weigh_records = []
+    for plant_id in [1, 2, 3, 5]:
+        p = waste_db.query(SegregationPlant).filter(SegregationPlant.id == plant_id).first()
+        if p:
+            for k in range(5):
+                gross = round(random.uniform(7.5, 12.0), 2)
+                tare = round(random.uniform(4.5, 5.5), 2)
+                weigh_records.append(WeighbridgeRecord(
+                    facility_id=p.id,
+                    facility_name=p.name,
+                    vehicle_code=f"GC-{(k % 24) + 1:02d}",
+                    gross_weight_tons=gross,
+                    tare_weight_tons=tare,
+                    net_weight_tons=round(gross - tare, 2),
+                    primary_waste_category="Mixed Waste",
+                    source_ward_number=random.randint(1, 200),
+                    is_simulated=True,
+                    data_source="simulation",
+                    timestamp=now - timedelta(hours=k*3)
+                ))
+    waste_db.add_all(weigh_records)
+    waste_db.commit()
+
+    # 9. Public Grievances (Sanitation Complaints)
+    complaints = [
+        PublicComplaint(
+            complaint_code="GCC-SAN-2026-001",
+            category="Overflowing bins",
+            description="Public bin near Anna Nagar 2nd Avenue bus stop is overflowing onto the pedestrian pathway.",
+            location_name="2nd Avenue, Near Roundtana, Anna Nagar",
+            ward_number=102,
+            zone_number=8,
+            latitude=13.0850,
+            longitude=80.2100,
+            citizen_name="S. Sundaram",
+            citizen_phone="+91 98401 22334",
+            priority="High",
+            assigned_department="Solid Waste Management",
+            assigned_staff_name="S. Jayaraman (Sanitary Inspector)",
+            status="In Progress",
+            is_simulated=True,
+            data_source="simulation",
+            created_at=now - timedelta(hours=6)
         ),
-        AIModelVersion(
-            model_name="GCC-WasteVision-YOLO",
-            version="v2.0",
-            status="archived",
-            framework="PyTorch 2.1 / YOLOv8m",
-            accuracy=0.862,
-            precision=0.850,
-            recall=0.831,
-            f1_score=0.835,
-            training_images_count=10000,
-            training_date=datetime.utcnow() - timedelta(days=90),
-            dataset_version="GCC-DS-2025.4",
-            class_metrics_json="{}",
-            notes="Archived model from Q4 2025.",
-            is_active_production=False
+        PublicComplaint(
+            complaint_code="GCC-SAN-2026-002",
+            category="Missed garbage collection",
+            description="Door-to-door waste collection truck did not visit 4th Street this morning.",
+            location_name="4th Cross Street, Besant Nagar",
+            ward_number=175,
+            zone_number=13,
+            latitude=12.9980,
+            longitude=80.2670,
+            citizen_name="Priya Subramanian",
+            citizen_phone="+91 98402 55667",
+            priority="Medium",
+            assigned_department="Solid Waste Management",
+            assigned_staff_name="G. Anand (Ward Supervisor)",
+            status="Assigned",
+            is_simulated=True,
+            data_source="simulation",
+            created_at=now - timedelta(hours=4)
+        ),
+        PublicComplaint(
+            complaint_code="GCC-SAN-2026-003",
+            category="Illegal dumping",
+            description="Commercial building debris dumped along vacant land plot.",
+            location_name="Mount-Poonamallee Road, Porur",
+            ward_number=152,
+            zone_number=11,
+            latitude=13.0380,
+            longitude=80.1580,
+            citizen_name="M. Karthikeyan",
+            citizen_phone="+91 98403 99881",
+            priority="Critical",
+            assigned_department="Sanitation Operations",
+            assigned_staff_name="Er. R. Kumar (Sanitary Officer)",
+            status="Submitted",
+            is_simulated=True,
+            data_source="simulation",
+            created_at=now - timedelta(hours=1)
         )
     ]
-    db.add_all(models)
-    db.commit()
+    waste_db.add_all(complaints)
+    waste_db.commit()
 
-    # 8. Training Jobs
-    job = TrainingJob(
-        job_code="JOB-2026-0901",
-        candidate_version="v2.2",
-        base_version="v2.1",
-        new_images_count=500,
-        status="completed",
-        current_epoch=50,
-        total_epochs=50,
-        train_loss=0.084,
-        val_loss=0.112,
-        val_accuracy=0.921,
-        val_f1=0.914,
-        started_at=datetime.utcnow() - timedelta(days=2, hours=3),
-        completed_at=datetime.utcnow() - timedelta(days=2),
-        log_output="Epoch 50/50 [================] - loss: 0.084 - val_loss: 0.112 - val_acc: 0.921 - val_f1: 0.914. Candidate model weights saved successfully."
-    )
-    db.add(job)
-    db.commit()
-
-    # 9. Smart Truck AI Detections
-    detection_items = [
-        ("Plastic Bottle (PET)", 0.96, 0.15, 68.0),
-        ("Corrugated Cardboard Box", 0.93, 0.45, 72.0),
-        ("Vegetable Food Scraps", 0.91, 1.80, 84.0),
-        ("Aluminum Beverage Can", 0.94, 0.08, 55.0),
-        ("Office Printing Paper", 0.89, 0.32, 60.0),
-        ("Discarded Glass Condiment Jar", 0.92, 0.40, 70.0),
-        ("Coconut Shell Biomass", 0.95, 2.10, 88.0),
-        ("Single-use Polybag Cluster", 0.88, 0.22, 65.0),
-        ("Broken Electronic PCB", 0.91, 0.60, 40.0),
-        ("Discarded Synthetic Garment", 0.87, 0.75, 58.0)
-    ]
-
-    detections = []
-    for idx, (waste_name, conf, wt, fill) in enumerate(detection_items * 3):
-        v_idx = (idx % 24) + 1
-        v_code = f"GC-{v_idx:02d}"
-        w_num = random.randint(1, 200)
-        w_obj = db.query(Ward).filter(Ward.ward_number == w_num).first()
-
-        bbox = [
-            round(random.uniform(0.12, 0.25), 2),
-            round(random.uniform(0.15, 0.28), 2),
-            round(random.uniform(0.72, 0.88), 2),
-            round(random.uniform(0.70, 0.86), 2)
-        ]
-
-        det = AIDetection(
-            detection_code=f"DET-2026-{1000 + idx}",
-            vehicle_code=v_code,
-            ward_number=w_num,
-            location_name=w_obj.name if w_obj else f"Ward {w_num}",
-            latitude=w_obj.latitude if w_obj else 13.0827,
-            longitude=w_obj.longitude if w_obj else 80.2707,
-            waste_category=waste_name,
-            confidence=conf,
-            bounding_box_json=json.dumps(bbox),
-            image_url="/assets/samples/waste_sample.jpg",
-            model_version="v2.1",
-            estimated_weight_kg=wt,
-            bin_fill_level_pct=fill,
-            timestamp=datetime.utcnow() - timedelta(minutes=idx * 7),
-            data_type="AI-DETECTED DATA"
-        )
-        detections.append(det)
-
-    db.add_all(detections)
-    db.commit()
-
-    # 10. Sample Community Contributions (staging for training)
-    contrib_samples = [
-        ("Citizen Priya S.", "Plastic Bottle", 0.94, "Plastic", False, 88.0, "valid", "staged_for_training", 174, "Besant Nagar Beach"),
-        ("Suresh K.", "Cardboard Box", 0.92, "Cardboard", False, 91.0, "valid", "staged_for_training", 82, "Anna Nagar 2nd Avenue"),
-        ("Dr. Ananya N.", "Organic Food", 0.82, "Food Waste", True, 76.0, "valid", "staged_for_training", 112, "Chetpet"),
-        ("Vignesh R.", "Paper Flyer", 0.89, "Paper", False, 82.0, "valid", "staged_for_training", 140, "T. Nagar Bus Terminus"),
-        ("Deepa Raman", "Glass Bottle", 0.95, "Glass", False, 89.0, "valid", "staged_for_training", 155, "Mylapore Tank"),
-        ("M. Balaji", "Lithium Battery", 0.78, "Hazardous Waste", True, 74.0, "valid", "staged_for_training", 102, "Royapuram MC Road"),
-        ("Kavitha M.", "Aluminum Can", 0.93, "Metal", False, 85.0, "valid", "staged_for_training", 180, "Adyar Shastri Nagar")
-    ]
-
-    for name, aipred, aiconf, usercat, iscorr, blur, qstat, vstat, w_no, loc in contrib_samples:
-        c = ImageContribution(
-            contributor_name=name,
-            image_url="/assets/samples/sample_contrib.jpg",
-            image_hash=f"hash_{random.randint(100000, 999999)}",
-            file_size_kb=round(random.uniform(90.0, 320.0), 1),
-            ai_predicted_category=aipred,
-            ai_confidence=aiconf,
-            user_confirmed_category=usercat,
-            is_user_corrected=iscorr,
-            user_notes="Contributed to improve local Chennai plastic detection.",
-            blur_score=blur,
-            quality_status=qstat,
-            validation_status=vstat,
-            ward_number=w_no,
-            location_name=loc,
-            created_at=datetime.utcnow() - timedelta(hours=random.randint(2, 48)),
-            data_type="USER-CONTRIBUTED DATA"
-        )
-        db.add(c)
-    db.commit()
-
-    # 11. Operational Alerts
+    # 10. Operational Alerts
     alerts = [
         OperationalAlert(
-            alert_code="ALT-2026-001",
+            alert_code="ALT-2026-01",
             priority="Critical",
-            category="Plant Near Capacity",
-            location_name="Perungudi Waste Processing Center (Zone 14)",
+            category="Plant Capacity",
+            location_name="Perungudi Solid Waste Processing Center",
             ward_number=170,
-            issue="Facility input reached 2,180 TPD (83.8% of daily rated capacity). Organic fraction surge from South Chennai causing offloading bottleneck.",
-            recommended_action="Trigger AI Dynamic Load Balancing to divert 220 TPD wet waste to Madhavaram Bio-CNG and Pallikaranai MRF.",
-            status="Active",
-            timestamp=datetime.utcnow() - timedelta(minutes=24)
+            issue="Intake capacity reached 84% (2180 TPD of 2600 TPD max). Rerouting recommended.",
+            recommended_action="Divert incoming compaction trucks from Zone 13 & 14 to Pallikaranai MRF.",
+            status="Active"
         ),
         OperationalAlert(
-            alert_code="ALT-2026-002",
+            alert_code="ALT-2026-02",
             priority="High",
-            category="Low Segregation Efficiency",
-            location_name="Ward 102 (Royapuram Harbor Sector)",
-            ward_number=102,
-            issue="Segregation efficiency dropped to 41.2% over last 48 hours. Plastic and wet food contamination detected in blue commercial bins.",
-            recommended_action="Deploy Ward 102 Swachhata inspector team for commercial vendor compliance checks.",
-            status="Active",
-            timestamp=datetime.utcnow() - timedelta(hours=2)
-        ),
-        OperationalAlert(
-            alert_code="ALT-2026-003",
-            priority="High",
-            category="High Waste Accumulation",
-            location_name="Ward 82 (Anna Nagar West Commercial Hub)",
-            ward_number=82,
-            issue="Commercial waste accumulation increased +34% compared to baseline. Secondary collection bins at 90% volume.",
-            recommended_action="Dispatch auxiliary compactor truck GC-12 for supplemental afternoon run at 14:30 hrs.",
-            status="Active",
-            timestamp=datetime.utcnow() - timedelta(hours=3, minutes=15)
-        ),
-        OperationalAlert(
-            alert_code="ALT-2026-004",
-            priority="Medium",
-            category="Facility Maintenance",
-            location_name="Valasaravakkam Micro Processing Plant (Zone 11)",
-            ward_number=148,
-            issue="Conveyor belt shredder undergoing scheduled quarterly motor overhaul.",
-            recommended_action="Route Zone 11 dry recyclables to Ambattur Recovery Hub during 48-hour maintenance window.",
-            status="Active",
-            timestamp=datetime.utcnow() - timedelta(hours=6)
-        ),
-        OperationalAlert(
-            alert_code="ALT-2026-005",
-            priority="Low",
-            category="Low AI Detection Confidence",
-            location_name="Vehicle GC-18 Camera Feed (Ward 65, Perambur)",
-            ward_number=65,
-            issue="Camera lens flagged optical smudging; confidence dropped to 72% on 3 consecutive bin sweeps.",
-            recommended_action="Notify driver M. Saravanan to wipe front camera lens at next transit checkpoint.",
-            status="Active",
-            timestamp=datetime.utcnow() - timedelta(hours=4)
+            category="Segregation",
+            location_name="Ward 38 (Kodungaiyur East)",
+            ward_number=38,
+            issue="Segregation efficiency dropped below 40% threshold for three consecutive collection shifts.",
+            recommended_action="Deploy Ward Sanitation Outreach team and issue notices to commercial establishments.",
+            status="Active"
         )
     ]
-    db.add_all(alerts)
-    db.commit()
+    waste_db.add_all(alerts)
+    waste_db.commit()
 
-    # 12. Optimization Recommendations
-    recs = [
-        OptimizationRecommendation(
-            recommendation_code="REC-OPT-01",
-            category="Plant Load Balancing",
-            ward_number=174,
-            ward_name="Adyar (Ward 174)",
-            target_plant_name="Madhavaram Bio-CNG Facility",
-            title="Divert South Chennai Wet Waste from Perungudi to Bio-CNG",
-            description="Perungudi processing unit is approaching 84% operational threshold. Re-routing 12 collection compactor trips daily to Madhavaram Bio-CNG utilizes available capacity and saves open-dump stacking.",
-            expected_benefit="Reduces Perungudi load by 140 TPD and produces ~920 kg compressed bio-gas daily.",
-            confidence_score=0.94,
-            status="Active",
-            tag="AI RECOMMENDATION"
-        ),
-        OptimizationRecommendation(
-            recommendation_code="REC-OPT-02",
-            category="Collection Frequency",
-            ward_number=82,
-            ward_name="Anna Nagar (Ward 82)",
-            target_plant_name="Perungudi Processing Center",
-            title="Schedule Secondary Afternoon Pickup for Commercial Corridors",
-            description="Ward 82 commercial zones produce 36.8 TPD waste. Mid-day restaurant and packaging bin surges cause afternoon overflow.",
-            expected_benefit="Reduces roadside bin spillage by 44% and eliminates secondary scavenging.",
-            confidence_score=0.91,
-            status="Active",
-            tag="AI RECOMMENDATION"
-        ),
-        OptimizationRecommendation(
-            recommendation_code="REC-OPT-03",
-            category="Route Optimization",
-            ward_number=136,
-            ward_name="T. Nagar Commercial (Ward 136)",
-            target_plant_name="Alandur Waste Transfer Station",
-            title="Advance Morning Collection Window to 05:45 AM",
-            description="Smart truck fleet telemetry indicates GC-07 and GC-08 encounter 22 minutes average traffic delay on Usman Road after 07:30 AM.",
-            expected_benefit="Saves 42 liters diesel weekly per truck and decreases transit time by 32%.",
-            confidence_score=0.89,
-            status="Active",
-            tag="AI RECOMMENDATION"
-        )
+    # 11. IoT Devices & Telemetry
+    devices = [
+        IoTDevice(device_id="BIN-ZONE8-01", device_type="smart_bin", name="Anna Nagar Metro Smart Bin", ward_number=102, zone_number=8, status="online", battery_level=88.0, is_simulated=True),
+        IoTDevice(device_id="BIN-ZONE13-01", device_type="smart_bin", name="Besant Nagar Beach Smart Bin", ward_number=175, zone_number=13, status="online", battery_level=94.0, is_simulated=True),
+        IoTDevice(device_id="TRUCK-GC01", device_type="vehicle_tracker", name="GC-01 Fleet Telemetry Unit", ward_number=102, zone_number=8, status="online", battery_level=98.0, is_simulated=True)
     ]
-    db.add_all(recs)
-    db.commit()
+    waste_db.add_all(devices)
+    waste_db.commit()
 
-    print("Chennai Waste Management Platform database successfully seeded with authentic data.")
+    telemetry = [
+        DeviceTelemetry(device_id="BIN-ZONE8-01", latitude=13.0850, longitude=80.2100, bin_fill_pct=72.5, temperature_c=31.2, is_simulated=True, data_source="simulation"),
+        DeviceTelemetry(device_id="BIN-ZONE13-01", latitude=12.9980, longitude=80.2670, bin_fill_pct=45.0, temperature_c=30.8, is_simulated=True, data_source="simulation"),
+        DeviceTelemetry(device_id="TRUCK-GC01", latitude=13.0827, longitude=80.2707, speed_kmh=22.4, battery_pct=98.0, is_simulated=True, data_source="simulation")
+    ]
+    waste_db.add_all(telemetry)
+    waste_db.commit()
+
+    # 12. Simulation Run State
+    sim_run = SimulationRun(
+        simulation_run_id=simulation_run_id,
+        status="running" if settings.SIMULATION_MODE else "stopped",
+        tick_interval_seconds=settings.SIMULATION_TICK_SECONDS,
+        events_generated=150,
+        last_tick_at=now
+    )
+    waste_db.add(sim_run)
+    waste_db.commit()
+
+def seed_all_databases():
+    """Master seeding function: creates tables and seeds all three distinct databases."""
+    init_all_tables()
+
+    user_db = UserSessionLocal()
+    staff_db = StaffSessionLocal()
+    waste_db = WasteSessionLocal()
+
+    try:
+        seed_database_a(user_db)
+        seed_database_b(staff_db, user_db)
+        waste_db = WasteSessionLocal()
+        seed_database_c(waste_db)
+        logger.info("Successfully completed multi-database initialization and realistic synthetic seeding.")
+    except Exception as e:
+        logger.error(f"Error during multi-database seeding: {e}")
+        raise e
+    finally:
+        user_db.close()
+        staff_db.close()
+        waste_db.close()
+
+# Backward compatibility alias
+seed_database = lambda db: seed_all_databases()

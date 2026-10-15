@@ -1,16 +1,17 @@
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.core.database import get_db
+from app.core.database import get_user_db, get_waste_db
 from app.core.security import (
     hash_password, verify_password,
     create_access_token, get_current_user_from_token
 )
-from app.models.user import User, PasswordResetToken
+from app.core.rbac import MUNICIPAL_STAFF_ROLES
+from app.models.user import User, PasswordResetToken, AuthAuditLog
 from app.models.contribution import ImageContribution
 from app.schemas.auth import (
     UserRegister, UserLogin, ForgotPasswordRequest,
@@ -22,20 +23,20 @@ from app.schemas.auth import (
 router = APIRouter(prefix="/auth", tags=["Authentication & Roles"])
 
 @router.post("/register", response_model=TokenResponse)
-def register_user(req: UserRegister, db: Session = Depends(get_db)):
+def register_user(req: UserRegister, user_db: Session = Depends(get_user_db)):
+    """Public self-registration. Strictly grants 'contributor' or 'public' role only."""
     email_clean = req.email.strip().lower()
-    existing_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+    existing_user = user_db.query(User).filter(func.lower(User.email) == email_clean).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email address already exists. Please sign in instead."
         )
 
-    # Derive unique username from email
     base_username = email_clean.split("@")[0]
     username = base_username
     counter = 1
-    while db.query(User).filter(User.username == username).first():
+    while user_db.query(User).filter(User.username == username).first():
         username = f"{base_username}_{counter}"
         counter += 1
 
@@ -45,15 +46,24 @@ def register_user(req: UserRegister, db: Session = Depends(get_db)):
         email=email_clean,
         hashed_password=hashed_pw,
         full_name=req.full_name.strip(),
-        role="contributor", # Default role for new signups
+        role="contributor", # Public self-registration never grants staff or admin privileges
         organization=req.organization or "Resident Contributor",
         city=req.city or "Chennai",
-        contribution_points=50, # Welcome bonus points
-        badges="Eco Citizen, Early Adopter"
+        contribution_points=50,
+        badges="Eco Citizen, Early Adopter",
+        must_change_password=False,
+        email_verified=True,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc)
     )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    user_db.add(new_user)
+    user_db.commit()
+    user_db.refresh(new_user)
+
+    # Log registration in Database A
+    audit = AuthAuditLog(user_id=new_user.id, action="registration")
+    user_db.add(audit)
+    user_db.commit()
 
     token = create_access_token({"sub": new_user.email, "role": new_user.role})
     return {
@@ -63,13 +73,17 @@ def register_user(req: UserRegister, db: Session = Depends(get_db)):
     }
 
 @router.post("/login", response_model=TokenResponse)
-def login_user(req: UserLogin, db: Session = Depends(get_db)):
+def login_user(req: UserLogin, user_db: Session = Depends(get_user_db)):
     email_or_user = req.email.strip().lower()
-    user = db.query(User).filter(
+    user = user_db.query(User).filter(
         (func.lower(User.email) == email_or_user) | (func.lower(User.username) == email_or_user)
     ).first()
 
     if not user or not verify_password(req.password, user.hashed_password):
+        if user:
+            audit = AuthAuditLog(user_id=user.id, action="login_failure")
+            user_db.add(audit)
+            user_db.commit()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The email or password you entered is incorrect. Please try again."
@@ -81,6 +95,11 @@ def login_user(req: UserLogin, db: Session = Depends(get_db)):
             detail="Your account has been deactivated. Please contact the administrator."
         )
 
+    user.last_login_at = datetime.now(timezone.utc)
+    audit = AuthAuditLog(user_id=user.id, action="login_success")
+    user_db.add(audit)
+    user_db.commit()
+
     expire_delta = timedelta(days=30) if req.remember_me else timedelta(days=7)
     token = create_access_token({"sub": user.email, "role": user.role}, expires_delta=expire_delta)
 
@@ -91,14 +110,12 @@ def login_user(req: UserLogin, db: Session = Depends(get_db)):
     }
 
 @router.post("/forgot-password")
-def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(req: ForgotPasswordRequest, user_db: Session = Depends(get_user_db)):
     email_clean = req.email.strip().lower()
-    user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+    user = user_db.query(User).filter(func.lower(User.email) == email_clean).first()
 
-    # Even if user not found, return safe friendly message to prevent email enumeration,
-    # but if found, generate reset token
     reset_token = secrets.token_urlsafe(32)
-    expires = datetime.utcnow() + timedelta(hours=2)
+    expires = datetime.now(timezone.utc) + timedelta(hours=2)
 
     if user:
         token_entry = PasswordResetToken(
@@ -107,8 +124,8 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
             expires_at=expires,
             is_used=False
         )
-        db.add(token_entry)
-        db.commit()
+        user_db.add(token_entry)
+        user_db.commit()
 
     return {
         "success": True,
@@ -118,8 +135,8 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
     }
 
 @router.post("/reset-password")
-def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
-    token_entry = db.query(PasswordResetToken).filter(
+def reset_password(req: ResetPasswordRequest, user_db: Session = Depends(get_user_db)):
+    token_entry = user_db.query(PasswordResetToken).filter(
         PasswordResetToken.token == req.token.strip(),
         PasswordResetToken.is_used == False
     ).first()
@@ -130,13 +147,15 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
             detail="This password reset link is invalid or has already been used. Please request a new one."
         )
 
-    if datetime.utcnow() > token_entry.expires_at:
+    now = datetime.now(timezone.utc)
+    token_exp = token_entry.expires_at.replace(tzinfo=timezone.utc) if token_entry.expires_at.tzinfo is None else token_entry.expires_at
+    if now > token_exp:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This password reset link has expired. Please request a new link."
         )
 
-    user = db.query(User).filter(User.id == token_entry.user_id).first()
+    user = user_db.query(User).filter(User.id == token_entry.user_id).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -144,9 +163,13 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
         )
 
     user.hashed_password = hash_password(req.new_password)
-    user.updated_at = datetime.utcnow()
+    user.must_change_password = False
+    user.updated_at = datetime.now(timezone.utc)
     token_entry.is_used = True
-    db.commit()
+
+    audit = AuthAuditLog(user_id=user.id, action="password_reset_complete")
+    user_db.add(audit)
+    user_db.commit()
 
     return {
         "success": True,
@@ -161,7 +184,7 @@ def get_me(current_user: User = Depends(get_current_user_from_token)):
 def update_profile(
     req: UserProfileUpdate,
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
     if req.full_name is not None and req.full_name.strip():
         current_user.full_name = req.full_name.strip()
@@ -170,16 +193,16 @@ def update_profile(
     if req.city is not None:
         current_user.city = req.city.strip()
 
-    current_user.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(current_user)
+    current_user.updated_at = datetime.now(timezone.utc)
+    user_db.commit()
+    user_db.refresh(current_user)
     return current_user
 
 @router.put("/change-password")
 def change_password(
     req: ChangePasswordRequest,
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
     if not verify_password(req.current_password, current_user.hashed_password):
         raise HTTPException(
@@ -194,8 +217,13 @@ def change_password(
         )
 
     current_user.hashed_password = hash_password(req.new_password)
-    current_user.updated_at = datetime.utcnow()
-    db.commit()
+    current_user.must_change_password = False
+    current_user.updated_at = datetime.now(timezone.utc)
+
+    audit = AuthAuditLog(user_id=current_user.id, action="password_change")
+    user_db.add(audit)
+    user_db.commit()
+
     return {
         "success": True,
         "message": "Your password has been changed successfully."
@@ -204,10 +232,10 @@ def change_password(
 @router.get("/profile-stats", response_model=ContributorStatsResponse)
 def get_user_profile_stats(
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    waste_db: Session = Depends(get_waste_db)
 ):
-    # Query contributions submitted by this user
-    user_contribs = db.query(ImageContribution).filter(
+    # Query contributions from Database C
+    user_contribs = waste_db.query(ImageContribution).filter(
         ImageContribution.contributor_email == current_user.email
     ).all()
 
@@ -217,11 +245,11 @@ def get_user_profile_stats(
     rejected = sum(1 for c in user_contribs if c.validation_status == "rejected")
     corrections = sum(1 for c in user_contribs if c.is_user_corrected)
 
-    # If user hasn't submitted yet, provide initial baseline stats from user record
+    badges_list = [b.strip() for b in current_user.badges.split(",") if b.strip()] if current_user.badges else ["Eco Citizen"]
+
     if total == 0:
         points = current_user.contribution_points or 50
-        badges_list = [b.strip() for b in current_user.badges.split(",") if b.strip()] if current_user.badges else ["Eco Citizen"]
-        recent = db.query(ImageContribution).order_by(ImageContribution.created_at.desc()).limit(5).all()
+        recent = waste_db.query(ImageContribution).order_by(ImageContribution.created_at.desc()).limit(5).all()
         recent_data = [
             {
                 "id": r.id,
@@ -234,17 +262,16 @@ def get_user_profile_stats(
             for r in recent
         ]
         return {
-            "total_contributions": max(3, points // 20),
-            "validated_contributions": max(2, points // 30),
-            "pending_contributions": 1,
+            "total_contributions": max(1, points // 50),
+            "validated_contributions": max(1, points // 60),
+            "pending_contributions": 0,
             "rejected_contributions": 0,
-            "user_corrections": 1,
+            "user_corrections": 0,
             "eco_points": points,
             "badges": badges_list,
             "recent_uploads": recent_data
         }
 
-    badges_list = [b.strip() for b in current_user.badges.split(",") if b.strip()] if current_user.badges else ["Eco Citizen"]
     recent_data = [
         {
             "id": r.id,
@@ -270,31 +297,56 @@ def get_user_profile_stats(
 
 @router.get("/roles")
 def get_available_roles():
-    return [
-        {"role": "public", "title": "Public Visitor", "description": "View public dashboards, GIS map, ward analytics, environmental insights."},
-        {"role": "contributor", "title": "Registered Contributor", "description": "Upload waste photos, use live webcam detection, verify AI predictions, earn badges."},
-        {"role": "municipal_officer", "title": "Municipal Officer", "description": "Monitor GCC ward collection, track high-risk zones, view fleet operations and alerts."},
-        {"role": "plant_operator", "title": "Plant Operator", "description": "Update facility processing inputs, manage plant capacities and segregated streams."},
-        {"role": "ai_admin", "title": "AI Administrator", "description": "Monitor continuous retraining, review datasets, compare candidate vs production models."},
-        {"role": "system_admin", "title": "System Administrator", "description": "Full administrative access across all 17 municipal pages, users, and settings."}
+    """Returns the catalog of all roles: system admin, public, contributor, and 35 municipal roles."""
+    roles_list = [
+        {"role": "system_admin", "title": "System Administrator", "department": "Administration", "description": "Full platform administration, account provisioning, security, and models."},
+        {"role": "public", "title": "Public Resident", "department": "Citizens", "description": "Public portal access, collection tracking, complaints, awareness, and scores."},
+        {"role": "contributor", "title": "Eco Volunteer / Contributor", "department": "Citizens", "description": "Contribute waste photos, verify AI predictions, earn community points and badges."}
     ]
+    for role_code, info in MUNICIPAL_STAFF_ROLES.items():
+        roles_list.append({
+            "role": role_code,
+            "title": info["title"],
+            "department": info["department"],
+            "scope": info["scope"],
+            "description": f"GCC Staff Role: {info['title']} in {info['department']}"
+        })
+    return roles_list
 
 @router.post("/switch-role")
 def switch_user_role(
     req: RoleSwitchRequest,
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
-    valid_roles = ["public", "contributor", "municipal_officer", "plant_operator", "ai_admin", "system_admin"]
+    """
+    Role switching is permitted ONLY for System Administrators or between public/contributor modes.
+    Public users cannot self-escalate to System Administrator or Staff roles.
+    """
+    valid_roles = list(MUNICIPAL_STAFF_ROLES.keys()) + ["system_admin", "public", "contributor", "ai_admin", "municipal_officer", "plant_operator"]
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
+    # Enforce authorization: Non-admins cannot switch to staff or admin roles
+    if current_user.role != "system_admin":
+        if req.role in MUNICIPAL_STAFF_ROLES or req.role in ["system_admin", "ai_admin", "municipal_officer", "plant_operator"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Privilege escalation prohibited: Only System Administrators can assign staff or administrative roles."
+            )
+
     current_user.role = req.role
-    db.commit()
-    db.refresh(current_user)
+    current_user.updated_at = datetime.now(timezone.utc)
+    user_db.commit()
+    user_db.refresh(current_user)
+
+    audit = AuthAuditLog(user_id=current_user.id, action=f"role_switched_to_{req.role}")
+    user_db.add(audit)
+    user_db.commit()
+
     return {
         "success": True,
         "active_role": req.role,
         "user": current_user,
-        "message": f"Switched active role to {req.role}"
+        "message": f"Active role updated to {req.role}"
     }

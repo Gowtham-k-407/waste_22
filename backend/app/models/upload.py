@@ -8,7 +8,7 @@ class Upload(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     upload_id = Column(String, unique=True, index=True, default=lambda: f"UPL-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}")
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(Integer, nullable=True, index=True) # Linked to User in Database A
     user_name = Column(String, default="Citizen Contributor")
     user_email = Column(String, nullable=True)
 

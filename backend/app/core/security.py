@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import jwt, JWTError
 from passlib.hash import pbkdf2_sha256
@@ -7,7 +7,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import get_user_db
+from app.models.user import User
 
 security_bearer = HTTPBearer(auto_error=False)
 
@@ -27,11 +28,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Issue a signed JWT access token for user authentication."""
     to_encode = data.copy()
+    now_utc = datetime.now(timezone.utc)
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now_utc + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "iat": datetime.utcnow()})
+        expire = now_utc + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": int(expire.timestamp()), "iat": int(now_utc.timestamp())})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -45,34 +47,38 @@ def decode_access_token(token: str) -> Optional[dict]:
 
 def get_current_user_from_token(
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
-):
-    """Retrieve the current logged-in user from the Bearer token if provided."""
-    from app.models.user import User
+    user_db: Session = Depends(get_user_db)
+) -> User:
+    """Retrieve the authenticated user from the Bearer token in Database A."""
     if not auth or not auth.credentials:
-        # Fall back to default admin for legacy demo / backward compatibility if no token
-        user = db.query(User).filter(User.username == "admin").first()
-        return user or db.query(User).first()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please log in.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     payload = decode_access_token(auth.credentials)
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your session has expired or is invalid. Please sign in again."
+            detail="Your session has expired or is invalid. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     user_email = payload.get("sub")
     if not user_email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token. Please sign in again."
+            detail="Invalid authentication token. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = db.query(User).filter(User.email == user_email).first()
+    user = user_db.query(User).filter(User.email == user_email).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account associated with this session no longer exists."
+            detail="User account associated with this session no longer exists.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     if not user.is_active:
@@ -82,3 +88,25 @@ def get_current_user_from_token(
         )
 
     return user
+
+def get_optional_current_user(
+    auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
+    user_db: Session = Depends(get_user_db)
+) -> Optional[User]:
+    """Optional user resolution for public endpoints with personalized options."""
+    if not auth or not auth.credentials:
+        return None
+    try:
+        payload = decode_access_token(auth.credentials)
+        if not payload:
+            return None
+        user_email = payload.get("sub")
+        if not user_email:
+            return None
+        return user_db.query(User).filter(User.email == user_email, User.is_active == True).first()
+    except Exception:
+        return None
+
+# Backward compatibility aliases
+get_current_user = get_current_user_from_token
+get_current_user_optional = get_optional_current_user

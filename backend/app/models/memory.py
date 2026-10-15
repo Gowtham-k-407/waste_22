@@ -1,12 +1,12 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime
 from datetime import datetime
-from app.core.database import Base
+from app.core.database import UserBase
 
-class UserAIRef(Base):
+class UserAIRef(UserBase):
     __tablename__ = "user_ai_references"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    user_id = Column(Integer, index=True, nullable=False)
     image_id = Column(String, nullable=True)
     image_url = Column(String, nullable=False)
     image_hash = Column(String, index=True, nullable=False)

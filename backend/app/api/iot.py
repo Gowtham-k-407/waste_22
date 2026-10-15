@@ -5,10 +5,33 @@ from datetime import datetime
 
 from app.core.database import get_db
 from app.models.iot import IoTDevice, DeviceTelemetry
-from app.services.mqtt_service import process_telemetry_payload
+from app.services.mqtt_service import process_telemetry_payload, get_connection_status
 from app.services.iot_simulator import IoTSimulatorService
 
 router = APIRouter(prefix="/iot", tags=["IoT & Fleet Telemetry"])
+
+@router.get("/status")
+@router.get("/broker-status")
+def get_iot_broker_status(db: Session = Depends(get_db)):
+    """
+    Returns live Adafruit IO MQTT broker connection health, message counts,
+    active feeds, and device indicators.
+    """
+    conn = get_connection_status()
+    total_devices = db.query(IoTDevice).count()
+    online_devices = db.query(IoTDevice).filter(IoTDevice.status == "online").count()
+    real_devices = db.query(IoTDevice).filter(IoTDevice.is_simulated == False).count()
+
+    return {
+        "adafruit_io": conn,
+        "device_summary": {
+            "total_devices": total_devices,
+            "online_devices": online_devices,
+            "real_hardware_devices": real_devices,
+            "simulated_devices": total_devices - real_devices
+        },
+        "description": "Adafruit IO MQTT over TLS (Port 8883) for Smart Waste Bins, Scales & Telemetry"
+    }
 
 @router.get("/devices")
 def list_devices(
@@ -21,9 +44,9 @@ def list_devices(
         query = query.filter(IoTDevice.device_type == device_type)
     if is_simulated is not None:
         query = query.filter(IoTDevice.is_simulated == is_simulated)
-    
+
     devices = query.order_by(IoTDevice.last_seen_at.desc()).all()
-    
+
     result = []
     for d in devices:
         # Get latest telemetry reading

@@ -8,11 +8,12 @@ from datetime import datetime
 from PIL import Image
 from io import BytesIO
 
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db, get_waste_db
 from app.core.security import security_bearer, decode_access_token
 from app.models.detection import AIDetection
 from app.models.user import User
 from app.models.memory import UserAIRef
+from app.models.complaint import AIInferenceAudit
 from app.schemas.common_schemas import AIDetectionSchema
 from app.services.ai_vision_service import AIVisionService
 
@@ -23,7 +24,7 @@ def get_recent_detections(
     vehicle_code: Optional[str] = None,
     ward_number: Optional[int] = None,
     limit: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_waste_db)
 ):
     query = db.query(AIDetection)
     if vehicle_code:
@@ -59,7 +60,8 @@ def get_recent_detections(
 async def live_webcam_detect(
     file: UploadFile = File(...),
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db),
+    waste_db: Session = Depends(get_waste_db)
 ):
     """
     Core Multi-Stage AI Inference Engine:
@@ -83,10 +85,10 @@ async def live_webcam_detect(
     if auth and auth.credentials:
         payload = decode_access_token(auth.credentials)
         if payload and payload.get("sub"):
-            user = db.query(User).filter(User.email == payload.get("sub")).first()
+            user = user_db.query(User).filter(User.email == payload.get("sub")).first()
             if user:
-                # Query ONLY current user's active references (strict privacy isolation)
-                user_refs = db.query(UserAIRef).filter(
+                # Query ONLY current user's active references in Database A (strict privacy isolation)
+                user_refs = user_db.query(UserAIRef).filter(
                     UserAIRef.user_id == user.id,
                     UserAIRef.reference_status == "active"
                 ).all()
@@ -155,9 +157,9 @@ async def live_webcam_detect(
             "confidence_pct": int(combined_score * 100),
             "guidance_message": guidance
         },
-        "bounding_box": analysis["bounding_box"],
-        "secondary_prediction": analysis["secondary_prediction"],
-        "embedding": analysis["embedding"],
+        "bounding_box": analysis.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+        "secondary_prediction": analysis.get("secondary_prediction", {"predicted_category": "Mixed Waste", "confidence": 0.20}),
+        "embedding": analysis.get("embedding", []),
         "timestamp": datetime.utcnow().isoformat()
     }
 

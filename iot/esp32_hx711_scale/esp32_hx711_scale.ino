@@ -16,13 +16,15 @@
 const char* WIFI_SSID       = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD   = "YOUR_WIFI_PASSWORD";
 
-const char* MQTT_BROKER     = "broker.wastedash.chennaiswm.gov.in";
+// Adafruit IO MQTT Configuration (Port 8883 over TLS)
+const char* MQTT_BROKER     = "io.adafruit.com";
 const int   MQTT_PORT       = 8883;
-const char* MQTT_USER       = "scale_user";
-const char* MQTT_PASS       = "scale_password";
+const char* MQTT_USER       = "ADAFRUIT_IO_USERNAME"; // Adafruit IO Username
+const char* MQTT_PASS       = "ADAFRUIT_IO_KEY";      // Adafruit IO Key (AIO Key)
 
 const char* DEVICE_ID       = "SCALE-PLANT-PERUNGUDI-01";
-const char* MQTT_TOPIC      = "wastedash/devices/SCALE-PLANT-PERUNGUDI-01/telemetry";
+// Adafruit IO Feed Topic format: <username>/feeds/<feed-key>
+const char* MQTT_TOPIC      = "YOUR_ADAFRUIT_IO_USERNAME/feeds/wastedash-scale-weight";
 
 // HX711 Pins
 const int LOADCELL_DOUT_PIN = 19;

@@ -1,3 +1,4 @@
+import os
 import io
 import csv
 import json
@@ -8,27 +9,28 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db, get_waste_db, get_staff_db
 from app.core.security import (
-    security_bearer, decode_access_token, create_access_token, verify_password
+    security_bearer, decode_access_token, create_access_token, verify_password, hash_password
 )
-from app.models.user import User
+from app.models.user import User, AuthAuditLog
+from app.models.staff import StaffProfile, StaffDutyAssignment, StaffAuditLog
 from app.models.upload import Upload, DatasetImage
 from app.models.ai_model import AIModelVersion, TrainingJob
 from app.services.training_worker import ModelTrainingService, get_next_model_version
 
 router = APIRouter(prefix="/admin", tags=["Municipal Admin Portal & Model Training"])
 
-ADMIN_ROLES = {"ai_admin", "system_admin", "municipal_officer"}
+ADMIN_ROLES = {"ai_admin", "system_admin", "municipal_officer", "municipal_commissioner", "solid_waste_management_officer"}
 
-# Dependency: require admin role
+# Dependency: require admin role using Database A
 def require_admin(
     auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ) -> User:
     if not auth or not auth.credentials:
-        # Fallback to default admin user for ease of local demo if no header sent
-        admin_user = db.query(User).filter(User.role.in_(ADMIN_ROLES)).first()
+        # Fallback to default admin user in Database A for local dev / backward compatibility if no header
+        admin_user = user_db.query(User).filter(User.role.in_(ADMIN_ROLES)).first()
         if admin_user:
             return admin_user
         raise HTTPException(
@@ -43,7 +45,7 @@ def require_admin(
             detail="Invalid or expired admin session token."
         )
 
-    user = db.query(User).filter(User.email == payload.get("sub")).first()
+    user = user_db.query(User).filter(User.email == payload.get("sub")).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -53,7 +55,7 @@ def require_admin(
     if user.role not in ADMIN_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied: User role '{user.role}' lacks administrative permissions. Required: ai_admin, system_admin, or municipal_officer."
+            detail=f"Access denied: User role '{user.role}' lacks administrative permissions. Required: system_admin or officer."
         )
 
     return user
@@ -97,11 +99,11 @@ class StartTrainingRequest(BaseModel):
 # =========================================================================
 
 @router.post("/login")
-def admin_login(payload: AdminLoginRequest, db: Session = Depends(get_db)):
+def admin_login(payload: AdminLoginRequest, user_db: Session = Depends(get_user_db)):
     """
-    Authenticate administrative personnel with strict role checks.
+    Authenticate administrative personnel with strict role checks in Database A.
     """
-    user = db.query(User).filter(
+    user = user_db.query(User).filter(
         (User.email == payload.email) | (User.username == payload.email)
     ).first()
 
@@ -662,7 +664,7 @@ def activate_model(
 
     from app.services.ai_vision_service import AIVisionService
     from app.core.config import settings
-    checkpoint_file = target.weights_path or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
+    checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
     weights_to_use = checkpoint_file if os.path.exists(checkpoint_file) else None
     
     # Actually switch active neural inference model weights

@@ -35,6 +35,9 @@ backend/uploads/user_*
 
 # Environment & Local Secrets
 .env
+.env.*
+!.env.example
+!.env.*.example
 .env.local
 .env.development.local
 .env.test.local
@@ -59,5 +62,8 @@ Thumbs.db
 *.db-shm
 *.db-wal
 
-# SQLite database files
+# SQLite database files & backups
 *.db
+backend/backups/
+backend/models_checkpoints/*candidate*
+backend/models_checkpoints/classifier_v2.2.pt

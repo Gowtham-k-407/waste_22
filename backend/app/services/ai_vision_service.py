@@ -3,6 +3,7 @@ import time
 import json
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any, Tuple, List, Optional
 from PIL import Image, ImageStat
 import numpy as np
@@ -10,6 +11,7 @@ import torch
 import torchvision.transforms as transforms
 
 from app.core.config import settings
+from app.services.ai_fallback_service import AIFallbackService
 
 logger = logging.getLogger("wastedash.ai_vision")
 
@@ -160,7 +162,7 @@ class YOLOv8InferenceEngine(BaseInferenceEngine):
         # Run Ultralytics inference
         results = self.model(image, verbose=False)
         latency_ms = round((time.time() - t0) * 1000, 2)
-        
+
         detections = []
         w, h = image.size
 
@@ -175,14 +177,14 @@ class YOLOv8InferenceEngine(BaseInferenceEngine):
                 ymin = round(max(0.0, min(1.0, xyxy[1] / h)), 4)
                 xmax = round(max(0.0, min(1.0, xyxy[2] / w)), 4)
                 ymax = round(max(0.0, min(1.0, xyxy[3] / h)), 4)
-                
+
                 conf = round(float(box.conf[0].item()), 4)
                 cls_id = int(box.cls[0].item())
                 raw_name = self.model.names.get(cls_id, "trash").lower()
-                
+
                 cat, item_name = EXTERNAL_CLASS_MAPPING.get(raw_name, ("Mixed Waste", raw_name.title()))
                 color = CATEGORY_COLORS.get(cat, "#3B82F6")
-                
+
                 detections.append({
                     "object_name": item_name,
                     "raw_class": raw_name,
@@ -222,7 +224,7 @@ class TorchvisionClassifierEngine(BaseInferenceEngine):
             import torch.nn as nn
             self.model = models.mobilenet_v3_small(weights=None)
             self.model.classifier[3] = nn.Linear(self.model.classifier[3].in_features, len(MUNICIPAL_CATEGORIES))
-            
+
             if os.path.exists(self.weights_path):
                 state_dict = torch.load(self.weights_path, map_location=self.device)
                 self.model.load_state_dict(state_dict)
@@ -332,18 +334,18 @@ class AIVisionService:
 
     @staticmethod
     def validate_image_quality(
-        image: Image.Image, 
-        file_size_kb: float, 
-        existing_hashes: List[str], 
+        image: Image.Image,
+        file_size_kb: float,
+        existing_hashes: List[str],
         current_hash: str
     ) -> Tuple[bool, str, float]:
         width, height = image.size
         if width < 120 or height < 120:
             return False, "Image resolution too low (minimum 120x120 required)", 15.0
-        
+
         if file_size_kb < 3.0:
             return False, "File size suspiciously small (<3KB)", 10.0
-            
+
         if current_hash in existing_hashes:
             return False, "Duplicate image already exists in dataset", 50.0
 
@@ -443,93 +445,195 @@ class AIVisionService:
             return 0.0
 
     @classmethod
-    def detect_and_classify(cls, image: Image.Image, filename_hint: str = "") -> Dict[str, Any]:
-        """
-        Genuine Neural Network Waste Inference Pipeline:
-        1. Runs Ultralytics YOLOv8 for spatial object localization and bounding box detection.
-        2. Runs PyTorch MobileNetV3 deep classifier for multi-category probability distribution.
-        3. Fuses detections and checks confidence against abstention thresholds.
-        4. Extracts 128-d visual feature embedding for personal memory matching.
-        """
+    def _run_primary_model(cls, image: Image.Image) -> Optional[Dict[str, Any]]:
+        """Executes primary deep learning inference (Remote AI Microservice or local YOLO/MobileNet) on input image."""
+        # Check if remote AI microservice is configured
+        if settings.AI_INFERENCE_URL and settings.AI_INFERENCE_URL.strip():
+            try:
+                import io
+                import requests
+                buf = io.BytesIO()
+                image.save(buf, format="JPEG")
+                buf.seek(0)
+                headers = {}
+                if settings.AI_INFERENCE_API_KEY:
+                    headers["Authorization"] = f"Bearer {settings.AI_INFERENCE_API_KEY}"
+                    headers["X-API-Key"] = settings.AI_INFERENCE_API_KEY
+                endpoint = f"{settings.AI_INFERENCE_URL.rstrip('/')}/predict"
+                resp = requests.post(
+                    endpoint,
+                    files={"file": ("frame.jpg", buf.getvalue(), "image/jpeg")},
+                    headers=headers,
+                    timeout=settings.INFERENCE_TIMEOUT_SECONDS
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    cat = data.get("predicted_category") or data.get("category")
+                    conf = float(data.get("confidence", 0.0))
+                    return {
+                        "predicted_category": cat,
+                        "detected_item": data.get("detected_item") or data.get("item", f"{cat} Item"),
+                        "confidence": conf,
+                        "confidence_pct": int(data.get("confidence_pct", conf * 100)),
+                        "bounding_box": data.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+                        "bbox_xywh": data.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
+                        "color": data.get("color", CATEGORY_COLORS.get(cat, "#3B82F6")),
+                        "classification_method": "remote_ai_service",
+                        "latency_ms": data.get("latency_ms", 45.0)
+                    }
+                else:
+                    logger.warning(f"Remote AI inference failed with HTTP {resp.status_code}: {resp.text}")
+            except Exception as e:
+                logger.warning(f"Remote AI inference request exception: {e}")
+
         yolo_engine, classifier_engine = cls.get_engines()
+        if yolo_engine and yolo_engine.is_loaded:
+            yolo_res = yolo_engine.predict(image)
+            if yolo_res.get("success") and yolo_res.get("detections"):
+                top_det = yolo_res["detections"][0]
+                return {
+                    "predicted_category": top_det.get("waste_category"),
+                    "detected_item": top_det.get("object_name"),
+                    "confidence": top_det.get("confidence", 0),
+                    "confidence_pct": top_det.get("confidence_pct", 0),
+                    "bounding_box": top_det.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+                    "bbox_xywh": top_det.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
+                    "color": top_det.get("color", "#3B82F6"),
+                    "classification_method": "primary_ai",
+                    "latency_ms": yolo_res.get("latency_ms", 15.0),
+                    "all_detections": yolo_res.get("detections")
+                }
+
+        if classifier_engine and classifier_engine.is_loaded:
+            cls_res = classifier_engine.predict(image)
+            if cls_res.get("success"):
+                top_cat = cls_res.get("top_category")
+                conf = cls_res.get("confidence", 0)
+                return {
+                    "predicted_category": top_cat,
+                    "detected_item": f"{top_cat} Material",
+                    "confidence": conf,
+                    "confidence_pct": int(conf * 100),
+                    "bounding_box": [0.1, 0.1, 0.9, 0.9],
+                    "bbox_xywh": [0.1, 0.1, 0.8, 0.8],
+                    "color": CATEGORY_COLORS.get(top_cat, "#3B82F6"),
+                    "classification_method": "primary_ai",
+                    "latency_ms": cls_res.get("latency_ms", 25.0)
+                }
+        return None
+
+    @classmethod
+    def detect_and_classify(
+        cls,
+        image: Image.Image,
+        filename_hint: str = "",
+        force_fallback: bool = False,
+        primary_should_fail: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Centralized Municipal AI Vision Orchestrator with Mandatory Fallback:
+        1. Validates and extracts 128-d visual feature embedding.
+        2. Tries primary neural model (Ultralytics YOLO / MobileNet) unless force_fallback is set.
+        3. If primary succeeds with confidence >= threshold and valid category, returns primary result.
+        4. If primary fails, times out, raises exception, or yields low confidence:
+           Activates mandatory classical CV and rule-based heuristic fallback algorithm!
+        5. Returns structured diagnostic response detailing method, fallback status, and confidence.
+        """
+        t0 = time.time()
         embedding = cls.extract_image_embedding(image)
-        
-        # 1. Real YOLO Detection
-        yolo_res = yolo_engine.predict(image) if yolo_engine.is_loaded else {"success": False, "detections": []}
-        
-        # 2. Real Deep Classification
-        cls_res = classifier_engine.predict(image) if classifier_engine.is_loaded else {"success": False}
-        
-        # Determine Primary Object and Category
-        detected_item = "Unclassified Solid Waste"
-        primary_category = "Mixed Waste"
-        confidence = 0.50
-        bounding_box = [0.10, 0.10, 0.90, 0.90] # default bounding box covering object frame
-        
-        detections_list = yolo_res.get("detections", [])
-        
-        if detections_list:
-            # Real localized object found by YOLO
-            top_det = detections_list[0]
-            detected_item = top_det["object_name"]
-            primary_category = top_det["waste_category"]
-            confidence = top_det["confidence"]
-            bounding_box = top_det["bounding_box"]
-        elif cls_res.get("success"):
-            # Whole-image classification prediction
-            primary_category = cls_res["top_category"]
-            confidence = cls_res["confidence"]
-            detected_item = f"{primary_category} Item"
 
-        # Abstention / Low Confidence Gating (Threshold 0.45)
-        is_low_confidence = confidence < 0.45
-        status_label = "Low Confidence — Needs Review" if is_low_confidence else "High Confidence Detection"
-        
-        # Color mapping
-        color = CATEGORY_COLORS.get(primary_category, "#3B82F6")
+        primary_status = "unavailable"
+        primary_result = None
 
-        # Estimated typical weight
-        weight_map = {
-            "E-Waste": 0.25,
-            "Plastic": 0.08,
-            "Paper": 0.05,
-            "Cardboard": 0.35,
-            "Glass": 0.45,
-            "Metal": 0.15,
-            "Organic Waste": 0.60,
-            "Food Waste": 0.50,
-            "Textile Waste": 0.30,
-            "Hazardous Waste": 0.20,
-            "Mixed Waste": 0.40
-        }
-        est_weight = weight_map.get(primary_category, 0.30)
+        # Step 1: Attempt Primary Deep Learning Neural Inference
+        if not force_fallback and not primary_should_fail:
+            try:
+                prim = cls._run_primary_model(image)
+                if prim and prim.get("confidence", 0) >= settings.AI_CONFIDENCE_THRESHOLD and prim.get("predicted_category") in MUNICIPAL_CATEGORIES:
+                    primary_status = "success"
+                    primary_result = {
+                        "predicted_category": prim["predicted_category"],
+                        "detected_item": prim.get("detected_item", f"{prim['predicted_category']} Item"),
+                        "confidence": prim["confidence"],
+                        "confidence_pct": prim.get("confidence_pct", int(prim["confidence"] * 100)),
+                        "bounding_box": prim.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+                        "bbox_xywh": prim.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
+                        "color": prim.get("color", CATEGORY_COLORS.get(prim["predicted_category"], "#3B82F6")),
+                        "classification_method": prim.get("classification_method", "primary_ai"),
+                        "primary_model_status": "success",
+                        "fallback_used": False,
+                        "requires_review": False,
+                        "latency_ms": prim.get("latency_ms", round((time.time() - t0) * 1000, 2)),
+                        "stage_notes": f"Primary neural model ({cls._active_version}) executed successfully"
+                    }
+                elif prim:
+                    primary_status = "low_confidence" if prim.get("confidence", 0) < settings.AI_CONFIDENCE_THRESHOLD else "invalid_label"
+            except Exception as e:
+                logger.warning(f"Primary model inference exception: {e}")
+                primary_status = "exception_raised"
+        elif primary_should_fail:
+            primary_status = "simulated_primary_failure"
+        else:
+            primary_status = "forced_fallback"
 
-        # Secondary prediction
-        top_preds = cls_res.get("top_predictions", [])
-        secondary = top_preds[1] if len(top_preds) > 1 else {
-            "waste_category": "Mixed Waste",
-            "confidence": 0.20
-        }
+        # If primary succeeded with high confidence, return primary result
+        if primary_result is not None:
+            primary_result.update({
+                "model_version": cls._active_version,
+                "model_framework": "PyTorch 2.2 / YOLOv8-Waste",
+                "embedding": embedding,
+                "status": "High Confidence Detection",
+                "is_low_confidence": False,
+                "processing_timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            return primary_result
 
-        return {
-            "predicted_category": primary_category,
-            "detected_item": detected_item,
-            "confidence": confidence,
-            "confidence_pct": int(confidence * 100),
-            "status": status_label,
-            "is_low_confidence": is_low_confidence,
-            "bounding_box": bounding_box,
-            "color": color,
+        # Step 2: Primary Model Unusable/Failed -> Trigger Mandatory Fallback Algorithm
+        logger.info(f"Primary AI model unusable (status: {primary_status}). Activating classical CV fallback algorithm.")
+        try:
+            fallback_res = AIFallbackService.classify_with_fallback(image, filename_hint=filename_hint)
+        except Exception as e:
+            logger.error(f"Fallback classification exception: {e}")
+            return {
+                "success": False,
+                "predicted_category": "unknown",
+                "detected_item": "Unclassified Waste Item",
+                "confidence": 0.0,
+                "confidence_pct": 0,
+                "classification_method": "emergency_fallback",
+                "primary_model_status": primary_status,
+                "fallback_used": True,
+                "requires_review": True,
+                "bounding_box": [0.1, 0.1, 0.9, 0.9],
+                "bbox_xywh": [0.1, 0.1, 0.8, 0.8],
+                "color": "#94A3B8",
+                "embedding": embedding,
+                "fallback_details": {"error": str(e), "primary_status": primary_status},
+                "stage_notes": "Emergency recovery fallback activated after primary & secondary errors",
+                "processing_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        fallback_res.update({
+            "primary_model_status": primary_status,
             "model_version": cls._active_version,
-            "model_framework": "PyTorch 2.2 / YOLOv8-Waste",
-            "latency_ms": yolo_res.get("latency_ms", 15.0),
-            "stage_notes": f"Neural inference executed via {cls._active_version} model weights on CPU",
-            "secondary_prediction": {
-                "detected_item": secondary.get("waste_category", "Mixed Waste"),
-                "predicted_category": secondary.get("waste_category", "Mixed Waste"),
-                "confidence": secondary.get("confidence", 0.20)
-            },
+            "model_framework": "OpenCV Classical CV / Heuristic Fallback",
             "embedding": embedding,
-            "estimated_weight_kg": est_weight,
-            "all_detections": detections_list
+            "status": "Fallback Heuristic Classification" if not fallback_res.get("requires_review") else "Uncertain — Needs Verification",
+            "is_low_confidence": fallback_res.get("requires_review", True),
+            "secondary_prediction": {
+                "detected_item": "Mixed Waste",
+                "predicted_category": "Mixed Waste",
+                "confidence": 0.20
+            }
+        })
+
+        # Add estimated weight
+        weight_map = {
+            "E-Waste": 0.25, "Plastic": 0.08, "Paper": 0.05, "Cardboard": 0.35,
+            "Glass": 0.45, "Metal": 0.15, "Organic Waste": 0.60, "Food Waste": 0.50,
+            "Textile Waste": 0.30, "Hazardous Waste": 0.20, "Mixed Waste": 0.40,
+            "unknown": 0.25
         }
+        fallback_res["estimated_weight_kg"] = weight_map.get(fallback_res["predicted_category"], 0.30)
+
+        return fallback_res

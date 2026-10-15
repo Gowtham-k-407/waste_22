@@ -5,8 +5,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.database import engine, Base, SessionLocal
-from app.services.seed_service import seed_database
+from app.core.database import (
+    user_engine, staff_engine, waste_engine,
+    UserBase, StaffBase, WasteBase,
+    engine, Base, SessionLocal
+)
+from app.services.seed_service import seed_all_databases
+from app.services.simulation_engine import SimulationEngine
 
 # Import routers
 from app.api import (
@@ -14,22 +19,25 @@ from app.api import (
     vehicles, detections, contributions,
     training, models, datasets, optimization,
     alerts, environmental, simulation, memory,
-    uploads, admin_portal, iot
+    uploads, admin_portal, iot,
+    complaints, notifications, staff_portal, public_portal
 )
 from app.services.mqtt_service import start_mqtt_client_if_configured
 
-# Initialize database tables
-Base.metadata.create_all(bind=engine)
+# Initialize tables for all three isolated logical databases
+UserBase.metadata.create_all(bind=user_engine)
+StaffBase.metadata.create_all(bind=staff_engine)
+WasteBase.metadata.create_all(bind=waste_engine)
 
-# Seed database with authentic Chennai data
-db = SessionLocal()
-try:
-    seed_database(db)
-finally:
-    db.close()
+# Seed all 3 databases idempotently (preserves existing data)
+seed_all_databases()
 
 # Start background MQTT client if broker is configured
 start_mqtt_client_if_configured()
+
+# Start background simulation engine if enabled
+if settings.SIMULATION_MODE:
+    SimulationEngine.get_instance().start(interval_seconds=float(settings.SIMULATION_TICK_SECONDS))
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -70,6 +78,10 @@ app.include_router(memory.router, prefix=settings.API_V1_STR)
 app.include_router(uploads.router, prefix=settings.API_V1_STR)
 app.include_router(admin_portal.router, prefix=settings.API_V1_STR)
 app.include_router(iot.router, prefix=settings.API_V1_STR)
+app.include_router(complaints.router, prefix=settings.API_V1_STR)
+app.include_router(notifications.router, prefix=settings.API_V1_STR)
+app.include_router(staff_portal.router, prefix=settings.API_V1_STR)
+app.include_router(public_portal.router, prefix=settings.API_V1_STR)
 
 from fastapi import UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -121,8 +133,9 @@ async def detect_frame_with_active_model(
     cat = analysis["predicted_category"]
     color = category_colors.get(cat, "#8B5CF6" if "E-Waste" in cat else "#3B82F6")
 
-    ymin, xmin, ymax, xmax = analysis["bounding_box"]
-    bbox_xywh = [xmin, ymin, round(xmax - xmin, 4), round(ymax - ymin, 4)]
+    bbox = analysis.get("bounding_box", [0.1, 0.1, 0.9, 0.9])
+    ymin, xmin, ymax, xmax = bbox
+    bbox_xywh = analysis.get("bbox_xywh", [xmin, ymin, round(xmax - xmin, 4), round(ymax - ymin, 4)])
 
     # Model name & metrics
     m_name = active_model.model_name if active_model else "Waste Detection Model v2.1"
@@ -156,7 +169,11 @@ async def detect_frame_with_active_model(
         "waste_category": cat,
         "confidence_pct": analysis["confidence_pct"],
         "color": color,
-        "embedding": analysis.get("embedding", [])
+        "embedding": analysis.get("embedding", []),
+        "classification_method": analysis.get("classification_method", "primary_ai"),
+        "fallback_used": analysis.get("fallback_used", False),
+        "requires_review": analysis.get("requires_review", False),
+        "fallback_details": analysis.get("fallback_details")
     }
 
 

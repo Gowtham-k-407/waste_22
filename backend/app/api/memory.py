@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 from io import BytesIO
 from datetime import datetime
 from typing import List, Optional
@@ -8,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, s
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from app.core.database import get_db
+from app.core.database import get_user_db
 from app.core.config import settings
 from app.core.security import get_current_user_from_token
 from app.models.user import User
@@ -20,24 +21,22 @@ router = APIRouter(prefix="/memory", tags=["Personal AI Memory (My Waste AI Memo
 MEMORY_UPLOAD_DIR = os.path.join(settings.MEDIA_DIR, "memory_refs")
 os.makedirs(MEMORY_UPLOAD_DIR, exist_ok=True)
 
-
 class MemoryItemUpdate(BaseModel):
     confirmed_item: Optional[str] = None
     confirmed_waste_category: Optional[str] = None
     notes: Optional[str] = None
     reference_status: Optional[str] = None
 
-
 @router.get("/")
 def get_user_memory_items(
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
     """
-    Retrieve all personal AI memory references for the authenticated user only.
+    Retrieve all personal AI memory references for the authenticated user from Database A.
     Strict privacy guarantee: only the logged-in user's references are returned.
     """
-    refs = db.query(UserAIRef).filter(
+    refs = user_db.query(UserAIRef).filter(
         UserAIRef.user_id == current_user.id
     ).order_by(UserAIRef.created_at.desc()).all()
 
@@ -57,7 +56,6 @@ def get_user_memory_items(
         for r in refs
     ]
 
-
 @router.post("/add")
 async def add_to_personal_memory(
     confirmed_item: str = Form(...),
@@ -66,10 +64,10 @@ async def add_to_personal_memory(
     image_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
     """
-    Saves an item image as a personal reference for the authenticated user.
+    Saves an item image as a personal reference in Database A.
     Calculates and persists a dense 128-dimensional feature embedding for future webcam matching.
     """
     if file:
@@ -89,7 +87,6 @@ async def add_to_personal_memory(
     else:
         raise HTTPException(status_code=400, detail="Either an image file or image_url must be provided.")
 
-    # Calculate 128-d visual embedding
     embedding_vec = AIVisionService.extract_image_embedding(pil_img)
     resolved_category = confirmed_waste_category or ITEM_TO_PRIMARY_CATEGORY.get(confirmed_item, "E-Waste")
 
@@ -105,9 +102,9 @@ async def add_to_personal_memory(
         reference_status="active",
         notes=notes or f"Confirmed by {current_user.full_name}"
     )
-    db.add(ref_entry)
-    db.commit()
-    db.refresh(ref_entry)
+    user_db.add(ref_entry)
+    user_db.commit()
+    user_db.refresh(ref_entry)
 
     return {
         "success": True,
@@ -118,14 +115,13 @@ async def add_to_personal_memory(
         "image_url": ref_entry.image_url
     }
 
-
 @router.delete("/{ref_id}")
 def delete_personal_memory_item(
     ref_id: int,
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
-    ref = db.query(UserAIRef).filter(
+    ref = user_db.query(UserAIRef).filter(
         UserAIRef.id == ref_id,
         UserAIRef.user_id == current_user.id
     ).first()
@@ -133,19 +129,18 @@ def delete_personal_memory_item(
     if not ref:
         raise HTTPException(status_code=404, detail="Memory reference not found or unauthorized.")
 
-    db.delete(ref)
-    db.commit()
+    user_db.delete(ref)
+    user_db.commit()
     return {"success": True, "message": f"Reference '{ref.confirmed_item}' removed from your Personal AI Memory."}
-
 
 @router.put("/{ref_id}")
 def update_personal_memory_item(
     ref_id: int,
     req: MemoryItemUpdate,
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
-    ref = db.query(UserAIRef).filter(
+    ref = user_db.query(UserAIRef).filter(
         UserAIRef.id == ref_id,
         UserAIRef.user_id == current_user.id
     ).first()
@@ -163,21 +158,20 @@ def update_personal_memory_item(
         ref.reference_status = req.reference_status.strip()
 
     ref.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(ref)
+    user_db.commit()
+    user_db.refresh(ref)
 
     return {"success": True, "message": "Personal memory item updated successfully.", "item": ref.confirmed_item}
-
 
 @router.post("/search-match")
 async def search_memory_match(
     file: Optional[UploadFile] = File(None),
     embedding_json: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
     """
-    Compares a candidate frame against ONLY the authenticated user's active references.
+    Compares a candidate frame against ONLY the authenticated user's active references in Database A.
     Returns the top similarity match and explainable decision guidance.
     """
     if file:
@@ -189,8 +183,7 @@ async def search_memory_match(
     else:
         raise HTTPException(status_code=400, detail="Must provide either an image file or an embedding_json vector.")
 
-    # Search user's active references
-    user_refs = db.query(UserAIRef).filter(
+    user_refs = user_db.query(UserAIRef).filter(
         UserAIRef.user_id == current_user.id,
         UserAIRef.reference_status == "active"
     ).all()
@@ -215,7 +208,6 @@ async def search_memory_match(
         except Exception:
             continue
 
-    # Threshold for considering a visual match: >= 0.70 (70%)
     has_match = best_sim >= 0.70 and best_match is not None
     sim_pct = int(best_sim * 100)
 
@@ -236,13 +228,12 @@ async def search_memory_match(
         )
     }
 
-
 @router.get("/stats")
 def get_memory_stats(
     current_user: User = Depends(get_current_user_from_token),
-    db: Session = Depends(get_db)
+    user_db: Session = Depends(get_user_db)
 ):
-    refs = db.query(UserAIRef).filter(UserAIRef.user_id == current_user.id).all()
+    refs = user_db.query(UserAIRef).filter(UserAIRef.user_id == current_user.id).all()
     total = len(refs)
     active = sum(1 for r in refs if r.reference_status == "active")
     
@@ -258,5 +249,5 @@ def get_memory_stats(
         "categories_breakdown": categories,
         "items_breakdown": items,
         "embedding_model": "v2.2-embed (128-dim Normalized Spatial/Edge Feature Vector)",
-        "isolation_status": "Strict User-Level Cryptographic Isolation Active"
+        "isolation_status": "Strict User-Level Cryptographic Isolation Active (Database A)"
     }

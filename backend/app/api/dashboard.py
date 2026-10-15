@@ -1,9 +1,12 @@
-﻿from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from datetime import datetime
 from app.core.database import get_db
 from app.models import Ward, SegregationPlant, CollectionVehicle, WasteCategory
+from app.models.waste import WasteRecord
 from app.schemas.dashboard import DashboardSummary, MetricCard, CategoryItem, DataProvenance
+from app.services.simulation_engine import SimulationEngine
+from sqlalchemy import func
 
 router = APIRouter(prefix="/dashboard", tags=["Municipal Dashboard"])
 
@@ -13,6 +16,9 @@ SIMULATION_MODE = False
 @router.get("/summary", response_model=DashboardSummary)
 def get_dashboard_summary(db: Session = Depends(get_db)):
     global SIMULATION_MODE
+    engine = SimulationEngine.get_instance()
+    SIMULATION_MODE = engine.is_running
+
     wards = db.query(Ward).all()
     plants = db.query(SegregationPlant).all()
     vehicles = db.query(CollectionVehicle).all()
@@ -32,35 +38,58 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
 
     co2e_tons = round((total_daily_tons * (avg_segregation / 100.0) * 1.42), 1)
 
-    # Standardized 11 Waste Categories Distribution (Chennai Metro baseline)
-    category_shares = [
-        ("Organic Waste", 0.38, "#10B981", 95.0, "+2.4%"),
-        ("Food Waste", 0.22, "#84CC16", 92.0, "+1.1%"),
-        ("Plastic", 0.14, "#0EA5E9", 85.0, "-1.8%"),
-        ("Paper", 0.07, "#F59E0B", 90.0, "+0.5%"),
-        ("Cardboard", 0.05, "#D97706", 92.0, "+3.2%"),
-        ("Glass", 0.03, "#06B6D4", 100.0, "0.0%"),
-        ("Metal", 0.02, "#6366F1", 98.0, "+0.2%"),
-        ("Textile Waste", 0.02, "#EC4899", 65.0, "-0.4%"),
-        ("Electronic Waste", 0.015, "#8B5CF6", 80.0, "+1.9%"),
-        ("Hazardous Waste", 0.015, "#EF4444", 15.0, "-0.1%"),
-        ("Mixed / Unsegregated Waste", 0.04, "#64748B", 30.0, "-5.2%")
-    ]
+    # Database-driven Waste Categories Distribution
+    categories = db.query(WasteCategory).all()
+    records = db.query(
+        WasteRecord.category_id,
+        func.sum(WasteRecord.quantity_kg).label("total_kg")
+    ).group_by(WasteRecord.category_id).all()
+
+    cat_weights = {r.category_id: r.total_kg for r in records}
+    total_record_kg = sum(cat_weights.values()) or 1.0
 
     cat_items = []
-    for idx, (c_name, frac, col, rec, tr) in enumerate(category_shares):
-        qty = round(total_daily_tons * frac, 1)
-        cat_items.append(CategoryItem(
-            id=idx + 1,
-            name=c_name,
-            quantity_tons=qty,
-            percentage=round(frac * 100, 1),
-            color=col,
-            recyclability_pct=rec,
-            trend=tr
-        ))
+    if categories and records:
+        for idx, c in enumerate(categories):
+            kg = cat_weights.get(c.id, 0.0)
+            frac = (kg / total_record_kg) if total_record_kg > 0 else (1.0 / len(categories))
+            qty = round(total_daily_tons * frac, 1)
+            cat_items.append(CategoryItem(
+                id=c.id,
+                name=c.name,
+                quantity_tons=qty,
+                percentage=round(frac * 100, 1),
+                color=c.color,
+                recyclability_pct=c.recyclability_pct,
+                trend="+1.2%" if frac > 0.05 else "0.0%"
+            ))
+    else:
+        category_shares = [
+            ("Organic Waste", 0.38, "#10B981", 95.0, "+2.4%"),
+            ("Food Waste", 0.22, "#84CC16", 92.0, "+1.1%"),
+            ("Plastic", 0.14, "#0EA5E9", 85.0, "-1.8%"),
+            ("Paper", 0.07, "#F59E0B", 90.0, "+0.5%"),
+            ("Cardboard", 0.05, "#D97706", 92.0, "+3.2%"),
+            ("Glass", 0.03, "#06B6D4", 100.0, "0.0%"),
+            ("Metal", 0.02, "#6366F1", 98.0, "+0.2%"),
+            ("Textile Waste", 0.02, "#EC4899", 65.0, "-0.4%"),
+            ("Electronic Waste", 0.015, "#8B5CF6", 80.0, "+1.9%"),
+            ("Hazardous Waste", 0.015, "#EF4444", 15.0, "-0.1%"),
+            ("Mixed / Unsegregated Waste", 0.04, "#64748B", 30.0, "-5.2%")
+        ]
+        for idx, (c_name, frac, col, rec, tr) in enumerate(category_shares):
+            qty = round(total_daily_tons * frac, 1)
+            cat_items.append(CategoryItem(
+                id=idx + 1,
+                name=c_name,
+                quantity_tons=qty,
+                percentage=round(frac * 100, 1),
+                color=col,
+                recyclability_pct=rec,
+                trend=tr
+            ))
 
-    dt_type = "SIMULATED DATA" if SIMULATION_MODE else "HISTORICAL DATA"
+    dt_type = "SIMULATED DATA / DEMONSTRATION MODE" if SIMULATION_MODE else "HISTORICAL DATA"
 
     return DashboardSummary(
         total_waste_today_tons=MetricCard(

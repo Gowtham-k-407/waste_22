@@ -26,9 +26,9 @@ print("✓ 2. Friendly error on invalid password verified")
 # 3. User Registration
 test_email = "testcitizen.velachery@gmail.com"
 # Clean up if previously registered
-from app.core.database import SessionLocal
+from app.core.database import UserSessionLocal
 from app.models.user import User
-db = SessionLocal()
+db = UserSessionLocal()
 db.query(User).filter(User.email == test_email).delete()
 db.commit()
 db.close()
@@ -115,7 +115,7 @@ print("✓ 11. Profile stats returned badges & contribution metrics")
 # 12. Available Roles
 roles_resp = client.get("/api/auth/roles")
 assert roles_resp.status_code == 200
-assert len(roles_resp.json()) == 6
-print("✓ 12. All 6 municipal roles retrieved with descriptions")
+assert len(roles_resp.json()) >= 35
+print(f"✓ 12. All {len(roles_resp.json())} municipal & platform roles retrieved with descriptions")
 
 print("\n🎉 ALL 12 BACKEND AUTHENTICATION TESTS PASSED PERFECTLY!")

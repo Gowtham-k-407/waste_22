@@ -2,6 +2,7 @@ import os
 import io
 import time
 import json
+import hashlib
 import logging
 import threading
 from datetime import datetime
@@ -315,7 +316,7 @@ def run_training_pipeline_sync(
         job.status = "completed"
         job.stage = "completed"
         job.progress_pct = 100.0
-        job.model_version = candidate_version
+        job.candidate_version = candidate_version
         job.completed_at = datetime.utcnow()
         append_log(f"SUCCESS: AI Model {candidate_version} trained and verified. Ready for administrative deployment in Model Registry.")
         db.commit()
@@ -356,7 +357,7 @@ class ModelTrainingService:
         # Create TrainingJob record
         job = TrainingJob(
             job_code=f"JOB-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            model_version=candidate_version,
+            candidate_version=candidate_version,
             status="queued",
             stage="initializing",
             current_epoch=0,
@@ -377,3 +378,56 @@ class ModelTrainingService:
         _active_training_thread.start()
 
         return job
+
+    @staticmethod
+    def start_training_job(
+        db,
+        candidate_version: Optional[str] = None,
+        total_epochs: int = 5,
+        batch_size: int = 8,
+        learning_rate: float = 0.001
+    ) -> Dict[str, Any]:
+        try:
+            job = ModelTrainingService.start_training(
+                db=db,
+                candidate_version=candidate_version,
+                total_epochs=total_epochs,
+                batch_size=batch_size,
+                learning_rate=learning_rate
+            )
+            return {
+                "success": True,
+                "message": f"Training job {job.job_code} started for model version {job.candidate_version}.",
+                "job_code": job.job_code,
+                "candidate_version": job.candidate_version
+            }
+        except RuntimeError as e:
+            return {
+                "success": False,
+                "message": str(e)
+            }
+
+    @staticmethod
+    def get_training_status(db) -> Dict[str, Any]:
+        job = db.query(TrainingJob).order_by(TrainingJob.id.desc()).first()
+        if not job:
+            return {
+                "is_active": False,
+                "stage": "idle",
+                "progress_pct": 0.0,
+                "current_epoch": 0,
+                "total_epochs": 0,
+                "status": "idle",
+                "log_output": "No training jobs have been executed yet."
+            }
+        return {
+            "is_active": ModelTrainingService.is_training_active(),
+            "job_code": job.job_code,
+            "candidate_version": job.candidate_version,
+            "stage": job.stage or ("training" if job.status == "running" else job.status),
+            "progress_pct": job.progress_pct or 0.0,
+            "current_epoch": job.current_epoch or 0,
+            "total_epochs": job.total_epochs or 0,
+            "status": job.status,
+            "log_output": job.log_output or ""
+        }
