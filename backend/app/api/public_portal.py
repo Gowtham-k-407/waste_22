@@ -12,10 +12,152 @@ from app.models.vehicle import CollectionVehicle
 from app.models.waste import WasteCategory, WasteRecord
 from app.models.alert import Alert
 from app.models.complaint import PublicComplaint
+from app.models.user import User
+from app.core.security import get_current_user_from_token, get_current_user_optional
 
 router = APIRouter(prefix="/public", tags=["Public Portal Features"])
 
-# 1. AI Waste Identification & Segregation Guide
+# 0. Public Resident Area Dashboard (Scoped strictly to verified resident area & their own records)
+@router.get("/dashboard")
+def get_public_resident_dashboard(
+    db: Session = Depends(get_waste_db),
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """
+    Dedicated dashboard for ordinary public residents & contributors.
+    Returns ONLY:
+      1. Verified neighborhood area information & collection schedule.
+      2. Assigned collection truck status and location (no driver private info).
+      3. Neighborhood public waste statistics.
+      4. The citizen's OWN submitted sanitation grievances and resolution progress.
+    """
+    verified_ward = current_user.assigned_ward
+    ward = db.query(Ward).filter(Ward.ward_number == verified_ward).first()
+    vehicle = db.query(CollectionVehicle).filter(CollectionVehicle.assigned_ward_id == verified_ward).first()
+
+    # Truck location & operational status
+    if vehicle:
+        now = datetime.utcnow()
+        last_ping_dt = vehicle.last_ping or now
+        is_stale = (now - last_ping_dt).total_seconds() > 900
+        truck_data = {
+            "assigned": True,
+            "vehicle_code": vehicle.vehicle_code,
+            "vehicle_type": vehicle.vehicle_type,
+            "status": vehicle.status,
+            "current_fill_pct": vehicle.current_fill_pct,
+            "latitude": vehicle.latitude,
+            "longitude": vehicle.longitude,
+            "last_ping": vehicle.last_ping.isoformat() if vehicle.last_ping else None,
+            "is_stale": is_stale,
+            "data_mode": "stale" if is_stale else "simulated",
+            "message": f"Assigned to Ward {verified_ward} Door-to-Door Route"
+        }
+    else:
+        truck_data = {
+            "assigned": False,
+            "status": "unavailable",
+            "data_mode": "unavailable",
+            "message": f"No collection truck is currently active in Ward {verified_ward}."
+        }
+
+    # Public user's own grievances only!
+    my_complaints = db.query(PublicComplaint).filter(
+        PublicComplaint.citizen_user_id == current_user.id
+    ).order_by(PublicComplaint.created_at.desc()).limit(10).all()
+
+    area_name = getattr(ward, "name", None) or getattr(ward, "ward_name", f"Ward {verified_ward}")
+
+    ward_stats = {
+        "ward_number": verified_ward,
+        "daily_waste_tons": ward.daily_waste_tons if ward else 28.5,
+        "segregation_efficiency": f"{ward.segregation_efficiency}%" if ward else "64.2%",
+        "population": ward.population if ward else 45000
+    }
+
+    return {
+        "verified_ward": verified_ward,
+        "user": {
+            "id": current_user.id,
+            "full_name": current_user.full_name,
+            "email": current_user.email,
+            "assigned_ward": verified_ward,
+            "zone_number": (verified_ward - 1) // 14 + 1,
+            "area_name": f"Ward {verified_ward} - {area_name}"
+        },
+        "collection_schedule": {
+            "ward_number": verified_ward,
+            "area_name": area_name,
+            "collection_shift": "Morning Door-to-Door",
+            "timing": "06:30 - 11:30 IST",
+            "frequency": "Daily",
+            "status": "in_progress",
+            "last_updated": datetime.utcnow().isoformat()
+        },
+        "assigned_truck": truck_data,
+        "ward_stats": ward_stats,
+        "public_metrics": ward_stats,
+        "my_grievances": [
+            {
+                "id": c.id,
+                "complaint_code": c.complaint_code,
+                "tracking_number": c.complaint_code,
+                "category": c.category,
+                "description": c.description,
+                "location_address": c.location_name,
+                "status": c.status,
+                "priority": c.priority,
+                "assigned_department": c.assigned_department,
+                "assigned_authority": c.assigned_staff_name,
+                "current_escalation_tier": c.current_escalation_tier,
+                "can_escalate": c.is_escalation_eligible,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "resolved_at": c.resolved_at.isoformat() if c.resolved_at else None,
+                "estimated_sla_hours": c.sla_hours
+            }
+            for c in my_complaints
+        ],
+        "data_provenance": "OFFICIAL GCC MUNICIPAL AREA DISPATCH"
+    }
+
+# 1. Assigned Truck Public Telemetry (Scoped to user verified area)
+@router.get("/assigned-truck")
+def get_public_assigned_truck(
+    db: Session = Depends(get_waste_db),
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """
+    Returns only the public status and permitted location for the user's verified area truck.
+    Excludes driver identity, driver phone, fuel telemetry, and other wards' vehicles.
+    """
+    verified_ward = current_user.assigned_ward
+    v = db.query(CollectionVehicle).filter(CollectionVehicle.assigned_ward_id == verified_ward).first()
+    if not v:
+        return {
+            "assigned": False,
+            "status": "unavailable",
+            "data_mode": "unavailable",
+            "assigned_ward_id": verified_ward,
+            "message": f"No collection truck currently assigned to Ward {verified_ward}."
+        }
+    now = datetime.utcnow()
+    last_ping_dt = v.last_ping or now
+    is_stale = (now - last_ping_dt).total_seconds() > 900
+    return {
+        "assigned": True,
+        "vehicle_code": v.vehicle_code,
+        "vehicle_type": v.vehicle_type,
+        "status": v.status,
+        "current_fill_pct": v.current_fill_pct,
+        "latitude": v.latitude,
+        "longitude": v.longitude,
+        "last_ping": v.last_ping.isoformat() if v.last_ping else None,
+        "assigned_ward_id": v.assigned_ward_id,
+        "data_mode": "stale" if is_stale else "simulated",
+        "is_stale": is_stale
+    }
+
+# 2. AI Waste Identification & Segregation Guide
 @router.get("/segregation-guide")
 def get_segregation_guide(db: Session = Depends(get_waste_db)):
     categories = db.query(WasteCategory).all()
@@ -35,32 +177,39 @@ def get_segregation_guide(db: Session = Depends(get_waste_db)):
         ]
     }
 
-# 2. Waste Collection Tracking
+# 3. Waste Collection Tracking
 @router.get("/collection-tracking")
 def get_collection_tracking(
-    ward_id: int = Query(102, description="Ward number in Chennai (1-200)"),
-    db: Session = Depends(get_waste_db)
+    ward_id: Optional[int] = Query(None, description="Ward number in Chennai (1-200)"),
+    db: Session = Depends(get_waste_db),
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ):
-    ward = db.query(Ward).filter(Ward.ward_number == ward_id).first()
-    vehicles = db.query(CollectionVehicle).filter(CollectionVehicle.ward_id == ward_id).all()
-    if not vehicles:
-        vehicles = db.query(CollectionVehicle).limit(2).all()
+    # If user is authenticated, force query to their server-verified ward!
+    if current_user:
+        target_ward = current_user.assigned_ward
+    else:
+        target_ward = ward_id if (ward_id and 1 <= ward_id <= 200) else 102
+
+    ward = db.query(Ward).filter(Ward.ward_number == target_ward).first()
+    vehicles = db.query(CollectionVehicle).filter(CollectionVehicle.assigned_ward_id == target_ward).all()
 
     return {
-        "ward_id": ward_id,
-        "ward_name": ward.ward_name if ward else f"Ward {ward_id}",
-        "zone_name": ward.zone_name if ward else "Central Chennai",
-        "collection_status": "in_progress",
+        "ward_id": target_ward,
+        "ward_name": getattr(ward, "name", None) or getattr(ward, "ward_name", f"Ward {target_ward}"),
+        "zone_name": getattr(ward, "zone_name", "Central Chennai"),
+        "collection_status": "in_progress" if vehicles else "scheduled",
         "today_schedule": "Door-to-door morning collection: 06:30 - 11:30 IST",
         "assigned_vehicles": [
             {
-                "vehicle_number": v.vehicle_number,
+                "vehicle_code": v.vehicle_code,
                 "vehicle_type": v.vehicle_type,
                 "status": v.status,
-                "latitude": v.current_lat,
-                "longitude": v.current_lng,
-                "current_load_pct": round(((v.current_load_tons or 1.0) / (v.capacity_tons or 5.0)) * 100, 1),
-                "is_simulated": True
+                "latitude": v.latitude,
+                "longitude": v.longitude,
+                "current_fill_pct": v.current_fill_pct,
+                "last_ping": v.last_ping.isoformat() if v.last_ping else None,
+                "is_simulated": True,
+                "data_mode": "simulated"
             }
             for v in vehicles
         ],

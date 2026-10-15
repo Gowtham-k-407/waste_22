@@ -16,6 +16,7 @@ export interface User {
   is_active: boolean;
   contribution_points: number;
   badges: string;
+  assigned_ward?: number;
   created_at: string;
   updated_at?: string;
 }

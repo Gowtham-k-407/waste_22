@@ -343,4 +343,62 @@ export const api = {
       method: "POST",
       body: formData,
     }),
+
+  // Public Resident Area Dashboard & Truck
+  getPublicDashboard: () => fetchApi<any>("/public/dashboard"),
+  getAssignedTruck: () => fetchApi<any>("/public/assigned-truck"),
+
+  // Sanitation Grievance Redressal
+  getComplaints: (params?: { status?: string; category?: string; ward_id?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.status) q.append("status", params.status);
+    if (params?.category) q.append("category", params.category);
+    if (params?.ward_id) q.append("ward_id", params.ward_id.toString());
+    const queryStr = q.toString() ? `?${q.toString()}` : "";
+    return fetchApi<any>(`/complaints${queryStr}`);
+  },
+  getComplaintDetail: (trackingOrId: string | number) =>
+    fetchApi<any>(`/complaints/${trackingOrId}`),
+  submitComplaint: (data: {
+    category: string;
+    description: string;
+    location_address: string;
+    ward_id?: number;
+    photo_evidence_url?: string;
+    priority?: string;
+    reporter_phone?: string;
+  }) =>
+    fetchApi<any>("/complaints", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  addComplaintFollowUp: (complaintId: number, data: { message: string; attachment_url?: string }) =>
+    fetchApi<any>(`/complaints/${complaintId}/follow-up`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  escalateComplaint: (complaintId: number, data: { reason: string }) =>
+    fetchApi<any>(`/complaints/${complaintId}/escalate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  reopenComplaint: (complaintId: number, reason: string) =>
+    fetchApi<any>(`/complaints/${complaintId}/reopen?reason=${encodeURIComponent(reason)}`, {
+      method: "POST",
+    }),
+  updateComplaintStatus: (complaintId: number, data: {
+    status: string;
+    officer_notes?: string;
+    resolution_evidence_url?: string;
+    assigned_worker_name?: string;
+    assigned_department?: string;
+  }) =>
+    fetchApi<any>(`/complaints/${complaintId}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
 };

@@ -16,8 +16,29 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
+
+const STAFF_ROLES = [
+  "system_admin",
+  "municipal_officer",
+  "sanitary_inspector",
+  "assistant_engineer",
+  "ward_supervisor",
+  "field_officer",
+  "municipal_commissioner",
+  "solid_waste_management_officer",
+  "ai_admin"
+];
 
 export default function CollectionMonitoringPage() {
+  return (
+    <ProtectedRoute allowedRoles={STAFF_ROLES} requiredPermissionTitle="Municipal Fleet Monitoring">
+      <CollectionMonitoringContent />
+    </ProtectedRoute>
+  );
+}
+
+function CollectionMonitoringContent() {
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [search, setSearch] = useState("");

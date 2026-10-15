@@ -193,6 +193,21 @@ def update_profile(
         current_user.organization = req.organization.strip()
     if req.city is not None:
         current_user.city = req.city.strip()
+    if req.assigned_ward is not None:
+        if not (1 <= req.assigned_ward <= 200):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid ward number. Greater Chennai Corporation has wards 1 through 200."
+            )
+        import json
+        prefs = {}
+        if current_user.preferences_json:
+            try:
+                prefs = json.loads(current_user.preferences_json)
+            except Exception:
+                prefs = {}
+        prefs["assigned_ward"] = req.assigned_ward
+        current_user.preferences_json = json.dumps(prefs)
 
     current_user.updated_at = datetime.now(timezone.utc)
     user_db.commit()

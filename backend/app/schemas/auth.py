@@ -37,6 +37,7 @@ class UserProfileUpdate(BaseModel):
     full_name: Optional[str] = None
     organization: Optional[str] = None
     city: Optional[str] = None
+    assigned_ward: Optional[int] = None
 
 class UserResponse(BaseModel):
     id: int
@@ -46,6 +47,7 @@ class UserResponse(BaseModel):
     role: str
     organization: Optional[str] = None
     city: Optional[str] = None
+    assigned_ward: Optional[int] = None
     profile_image: Optional[str] = None
     is_active: bool
     contribution_points: int

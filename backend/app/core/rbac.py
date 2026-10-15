@@ -243,6 +243,8 @@ LEGACY_ROLE_MAP = {
     "public": ["public:view"]
 }
 
+ADMIN_ROLES = {"ai_admin", "system_admin", "municipal_officer", "municipal_commissioner", "solid_waste_management_officer"}
+
 def get_role_permissions(role: str) -> List[str]:
     if role == "system_admin":
         return ["*"]

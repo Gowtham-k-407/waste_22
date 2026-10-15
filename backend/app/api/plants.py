@@ -10,12 +10,26 @@ from app.schemas.common_schemas import PlantSchema
 
 router = APIRouter(prefix="/plants", tags=["Segregation & Recycling Plants"])
 
+PLANT_VIEW_ROLES = {
+    "system_admin", "assistant_engineer", "environmental_engineer",
+    "solid_waste_management_officer", "waste_processing_plant_operator",
+    "plant_operator", "municipal_commissioner", "municipal_officer",
+    "waste_disposal_facility_supervisor", "waste_weighbridge_operator",
+    "waste_management_project_manager", "municipal_control_room_operator"
+}
+
 @router.get("/", response_model=List[PlantSchema])
 def get_plants(
     status: Optional[str] = Query(None, pattern="^(active|inactive|maintenance)"),
     facility_type: Optional[str] = None,
+    current_user: User = Depends(get_current_user_from_token),
     db: Session = Depends(get_db)
 ):
+    if current_user.role not in PLANT_VIEW_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Access restricted. Segregation plant operational metrics are reserved for municipal plant engineers and operators. Citizens may use /api/public/nearby-facilities."
+        )
     query = db.query(SegregationPlant)
     if status:
         query = query.filter(SegregationPlant.status == status)

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey
+from sqlalchemy.orm import synonym
 from app.core.database import WasteBase
 
 class PublicComplaint(WasteBase):
@@ -52,18 +53,70 @@ class PublicComplaint(WasteBase):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Synonyms for seamless API & ORM backwards/forwards compatibility
+    tracking_number = synonym("complaint_code")
+    ward_id = synonym("ward_number")
+    reporter_user_id = synonym("citizen_user_id")
+    location_address = synonym("location_name")
+    photo_evidence_url = synonym("evidence_image_url")
+    reporter_name = synonym("citizen_name")
+    reporter_phone = synonym("citizen_phone")
+    reporter_email = synonym("citizen_email")
+
+    @property
+    def title(self) -> str:
+        cat_title = (self.category or "Grievance").replace("_", " ").title()
+        loc = f" at {self.location_name}" if self.location_name else ""
+        return f"{cat_title}{loc}"
+
+    @property
+    def current_escalation_tier(self) -> int:
+        if not self.status_history_json:
+            return 0
+        try:
+            import json
+            history = json.loads(self.status_history_json)
+            tiers = [entry.get("escalation_tier", 0) for entry in history if isinstance(entry, dict) and "escalation_tier" in entry]
+            return max(tiers) if tiers else 0
+        except Exception:
+            return 0
+
+    @property
+    def sla_hours(self) -> int:
+        return 24 if (self.priority or "").lower() in ("critical", "high") else 48
+
+    @property
+    def is_escalation_eligible(self) -> bool:
+        if (self.status or "").lower() in ("resolved", "closed"):
+            return False
+        if self.current_escalation_tier >= 3:
+            return False
+        return True
+
+
+GCC_ESCALATION_HIERARCHY = [
+    {"tier": 0, "title": "Ward Sanitary Inspector", "department": "Ward Sanitation Office"},
+    {"tier": 1, "title": "Assistant Engineer / Zonal Sanitation Officer", "department": "Zonal Health & Sanitation Wing"},
+    {"tier": 2, "title": "Municipal Health Officer", "department": "GCC Public Health Directorate"},
+    {"tier": 3, "title": "Municipal Commissioner Executive Cell", "department": "Commissioner Executive Grievance Cell"}
+]
+
 
 class ComplaintFollowUp(WasteBase):
     __tablename__ = "complaint_follow_ups"
 
     id = Column(Integer, primary_key=True, index=True)
     complaint_id = Column(Integer, ForeignKey("public_complaints.id"), index=True, nullable=False)
-    author_type = Column(String, default="citizen") # citizen, staff, system
+    author_type = Column(String, default="citizen") # citizen, staff, system, citizen_escalation
     author_name = Column(String, nullable=False)
     author_user_id = Column(Integer, nullable=True)
     message = Column(Text, nullable=False)
     evidence_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Synonyms
+    author_role = synonym("author_type")
+    attachment_url = synonym("evidence_url")
 
 
 class Notification(WasteBase):

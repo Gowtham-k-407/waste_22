@@ -15,8 +15,26 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
+
+const OPTIMIZATION_ROLES = [
+  "system_admin",
+  "municipal_officer",
+  "waste_management_data_analyst",
+  "municipal_commissioner",
+  "assistant_engineer",
+  "ai_admin"
+];
 
 export default function CollectionOptimizationPage() {
+  return (
+    <ProtectedRoute allowedRoles={OPTIMIZATION_ROLES} requiredPermissionTitle="Municipal Collection Optimization">
+      <CollectionOptimizationContent />
+    </ProtectedRoute>
+  );
+}
+
+function CollectionOptimizationContent() {
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [implementedIds, setImplementedIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);

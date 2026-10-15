@@ -30,6 +30,8 @@ import {
   BookmarkCheck
 } from "lucide-react";
 
+import { useAuth } from "@/lib/auth-context";
+
 interface SidebarProps {
   isOpen?: boolean;
   onClose?: () => void;
@@ -37,8 +39,33 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const isPublicUser = !user || user.role === "public" || user.role === "contributor";
 
-  const navGroups = [
+  const publicNavGroups = [
+    {
+      title: "My Neighborhood",
+      items: [
+        { name: "My Area & Truck", href: "/", icon: LayoutDashboard },
+        { name: "Sanitation Grievances", href: "/grievances", icon: FileText, badge: "Civic" },
+        { name: "Live Waste Map", href: "/map", icon: Map },
+        { name: "Environmental Impact", href: "/environmental", icon: Leaf },
+        { name: "Segregation Guide", href: "/about-data", icon: BookmarkCheck },
+      ],
+    },
+    {
+      title: "Citizen AI Vision",
+      items: [
+        { name: "Live Camera Detection", href: "/live-detection", icon: Camera, badge: "Live" },
+        { name: "AI Waste Detection", href: "/ai/detection", icon: ScanEye },
+        { name: "Contribute to Improve AI", href: "/ai/contribute", icon: UploadCloud, badge: "Citizen AI" },
+        { name: "My AI Memory", href: "/my-ai-memory", icon: Sparkles, badge: "Personal" },
+        { name: "My Profile", href: "/profile", icon: User },
+      ],
+    },
+  ];
+
+  const staffNavGroups = [
     {
       title: "Overview",
       items: [
@@ -60,15 +87,14 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
         { name: "Collection Monitoring", href: "/collection", icon: Truck },
         { name: "Segregation Plants", href: "/plants", icon: Factory },
         { name: "Collection Optimization", href: "/optimization", icon: Route },
-        { name: "Alerts", href: "/alerts", icon: BellRing },
+        { name: "Operational Alerts", href: "/alerts", icon: BellRing },
+        { name: "Sanitation Grievances", href: "/grievances", icon: FileText, badge: "Workflow" },
       ],
     },
     {
       title: "Smart AI & Vision",
       items: [
         { name: "Live Camera Detection", href: "/live-detection", icon: Camera, badge: "Live" },
-        { name: "Contribute to Improve AI", href: "/ai/contribute", icon: UploadCloud, badge: "Citizen AI" },
-        { name: "My AI Memory", href: "/my-ai-memory", icon: Sparkles, badge: "Personal" },
         { name: "AI Waste Detection", href: "/ai/detection", icon: ScanEye },
         { name: "AI Retraining Pipeline", href: "/admin/model-training", icon: Cpu, badge: "Retrain" },
       ],
@@ -84,6 +110,8 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       ],
     },
   ];
+
+  const navGroups = isPublicUser ? publicNavGroups : staffNavGroups;
 
   return (
     <>

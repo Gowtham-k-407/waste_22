@@ -16,8 +16,27 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
+
+const PLANT_ROLES = [
+  "system_admin",
+  "waste_processing_plant_operator",
+  "plant_operator",
+  "environmental_engineer",
+  "municipal_commissioner",
+  "municipal_officer",
+  "ai_admin"
+];
 
 export default function SegregationPlantsPage() {
+  return (
+    <ProtectedRoute allowedRoles={PLANT_ROLES} requiredPermissionTitle="Segregation Facility Operations">
+      <SegregationPlantsContent />
+    </ProtectedRoute>
+  );
+}
+
+function SegregationPlantsContent() {
   const [plants, setPlants] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [search, setSearch] = useState("");

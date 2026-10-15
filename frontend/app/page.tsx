@@ -16,37 +16,55 @@ import {
   UploadCloud, 
   AlertCircle,
   Clock,
-  Sparkles
+  Sparkles,
+  Building2,
+  MapPin,
+  FileText,
+  ShieldAlert,
+  ChevronRight,
+  PlusCircle
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { MetricCard } from "@/components/MetricCard";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
 import { MetricTooltip } from "@/components/MetricTooltip";
 
 export default function HomePage() {
+  const { user } = useAuth();
+  const isPublicUser = user && ["public", "contributor"].includes(user.role);
+
   const [summary, setSummary] = useState<any>(null);
   const [recentDetections, setRecentDetections] = useState<any[]>([]);
+  const [publicData, setPublicData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        setLoading(true);
+  async function loadData() {
+    try {
+      setLoading(true);
+      setError(null);
+      if (isPublicUser) {
+        const pData = await api.getPublicDashboard();
+        setPublicData(pData);
+      } else {
         const [dashData, detData] = await Promise.all([
           api.getDashboardSummary(),
           api.getRecentDetections(undefined, 6),
         ]);
         setSummary(dashData);
         setRecentDetections(detData);
-      } catch (err: any) {
-        setError(err.message || "Failed to load dashboard metrics");
-      } finally {
-        setLoading(false);
       }
+    } catch (err: any) {
+      setError(err.message || "Failed to load dashboard metrics");
+    } finally {
+      setLoading(false);
     }
+  }
+
+  useEffect(() => {
     loadData();
-  }, []);
+  }, [isPublicUser]);
 
   if (loading) {
     return (
@@ -59,6 +77,27 @@ export default function HomePage() {
         </div>
       </div>
     );
+  }
+
+  if (isPublicUser) {
+    if (error || !publicData) {
+      return (
+        <div className="p-8 text-center bg-white rounded-xl border border-rose-200 shadow-sm max-w-xl mx-auto my-12">
+          <AlertCircle className="w-12 h-12 text-rose-500 mx-auto mb-3" />
+          <h3 className="text-lg font-bold text-slate-800">Connection Error</h3>
+          <p className="text-sm text-slate-600 mt-1">
+            {error || "Something went wrong while loading your neighborhood dashboard."}
+          </p>
+          <button
+            onClick={() => loadData()}
+            className="mt-4 px-4 py-2 bg-navy-800 text-white text-xs font-semibold rounded-lg hover:bg-navy-900 transition"
+          >
+            Retry Connection
+          </button>
+        </div>
+      );
+    }
+    return <ResidentDashboardView publicData={publicData} />;
   }
 
   if (error || !summary) {
@@ -391,6 +430,248 @@ export default function HomePage() {
           Contribute Images Now
         </Link>
       </section>
+    </div>
+  );
+}
+
+function ResidentDashboardView({ publicData }: { publicData: any }) {
+  const { user, collection_schedule, assigned_truck, ward_stats, my_grievances } = publicData;
+
+  return (
+    <div className="space-y-6">
+      {/* Resident Welcome Banner */}
+      <div className="bg-gradient-to-r from-navy-950 via-navy-900 to-teal-950 text-white rounded-2xl p-6 sm:p-8 shadow-sm border border-navy-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+        <div className="space-y-2 max-w-2xl">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-500/20 border border-teal-500/30 text-teal-300 text-xs font-semibold">
+            <Building2 className="w-3.5 h-3.5" />
+            <span>Verified Citizen Dashboard • {user?.area_name}</span>
+          </div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+            Welcome, {user?.full_name}
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+            Neighborhood waste collection schedule, assigned collection truck tracking, and civic sanitation grievance redressal for your registered municipal ward.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2.5 shrink-0">
+          <Link
+            href="/grievances"
+            className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-xl shadow-sm transition"
+          >
+            <PlusCircle className="w-4 h-4" />
+            <span>Report Grievance</span>
+          </Link>
+          <Link
+            href="/live-detection"
+            className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-xl border border-white/20 transition"
+          >
+            <ScanEye className="w-4 h-4" />
+            <span>AI Waste Camera</span>
+          </Link>
+        </div>
+      </div>
+
+      {/* Grid: Schedule, Assigned Truck, Ward Waste Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Collection Schedule */}
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center">
+              <Clock className="w-5 h-5" />
+            </div>
+            <span className="px-2.5 py-0.5 text-[10px] font-bold rounded-full bg-teal-100 text-teal-800 uppercase">
+              {collection_schedule?.status?.replace("_", " ")}
+            </span>
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Collection Schedule</h3>
+            <p className="text-xs text-slate-500 mt-0.5">{collection_schedule?.area_name}</p>
+          </div>
+          <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
+            <div className="flex justify-between text-slate-600">
+              <span>Shift:</span>
+              <span className="font-semibold text-slate-800">{collection_schedule?.collection_shift}</span>
+            </div>
+            <div className="flex justify-between text-slate-600">
+              <span>Timing:</span>
+              <span className="font-semibold text-slate-800">{collection_schedule?.timing}</span>
+            </div>
+            <div className="flex justify-between text-slate-600">
+              <span>Frequency:</span>
+              <span className="font-semibold text-slate-800">{collection_schedule?.frequency}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Assigned Collection Truck */}
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center">
+              <Truck className="w-5 h-5" />
+            </div>
+            <span className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full uppercase ${
+              assigned_truck?.assigned ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-600"
+            }`}>
+              {assigned_truck?.status}
+            </span>
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Assigned Collection Truck</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {assigned_truck?.assigned ? assigned_truck.vehicle_type : "No active truck in ward"}
+            </p>
+          </div>
+          {assigned_truck?.assigned ? (
+            <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
+              <div className="flex justify-between text-slate-600">
+                <span>Vehicle Code:</span>
+                <span className="font-mono font-bold text-teal-800">{assigned_truck.vehicle_code}</span>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Location:</span>
+                <span className="font-semibold text-slate-800">
+                  {assigned_truck.latitude?.toFixed(4)}, {assigned_truck.longitude?.toFixed(4)}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Data Mode:</span>
+                <span className="font-bold text-amber-700 text-[10px] uppercase">
+                  {assigned_truck.data_mode} ({assigned_truck.is_stale ? "Stale Signal" : "Scheduled Dispatch"})
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500 pt-2 border-t border-slate-100">
+              No municipal truck is currently dispatched to your ward for this shift.
+            </p>
+          )}
+        </div>
+
+        {/* Ward Waste Performance */}
+        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+          <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+            <Leaf className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Ward Segregation & Volume</h3>
+            <p className="text-xs text-slate-500 mt-0.5">Municipal recycling metrics</p>
+          </div>
+          <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
+            <div className="flex justify-between text-slate-600">
+              <span>Daily Waste:</span>
+              <span className="font-bold text-slate-800">{ward_stats?.daily_waste_tons} Tons / Day</span>
+            </div>
+            <div className="flex justify-between text-slate-600">
+              <span>Segregation Rate:</span>
+              <span className="font-bold text-emerald-700">{ward_stats?.segregation_efficiency}</span>
+            </div>
+            <div className="flex justify-between text-slate-600">
+              <span>Ward Population:</span>
+              <span className="font-semibold text-slate-800">{ward_stats?.population?.toLocaleString()}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Citizen Grievance Tracker Widget */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <FileText className="w-5 h-5 text-teal-600" />
+            <h3 className="text-sm font-bold text-slate-800">My Submitted Sanitation Grievances</h3>
+          </div>
+          <Link
+            href="/grievances"
+            className="text-xs font-semibold text-teal-700 hover:text-teal-800 inline-flex items-center"
+          >
+            <span>View All & Escalate</span>
+            <ChevronRight className="w-4 h-4 ml-0.5" />
+          </Link>
+        </div>
+
+        {my_grievances && my_grievances.length > 0 ? (
+          <div className="divide-y divide-slate-100">
+            {my_grievances.map((g: any) => (
+              <div key={g.id} className="p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-mono text-xs font-bold text-teal-800">{g.complaint_code}</span>
+                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 text-slate-700 uppercase">
+                      {g.status?.replace("_", " ")}
+                    </span>
+                    {g.current_escalation_tier > 0 && (
+                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-50 text-amber-800 border border-amber-300">
+                        Tier {g.current_escalation_tier} Escalated
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-xs font-bold text-slate-800">{g.category?.replace(/_/g, " ").toUpperCase()}</h4>
+                  <p className="text-xs text-slate-600 line-clamp-1">{g.description}</p>
+                </div>
+                <Link
+                  href="/grievances"
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg shrink-0 transition"
+                >
+                  Track / Follow Up
+                </Link>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="p-8 text-center text-xs text-slate-500 space-y-2">
+            <p>You have not filed any sanitation grievances yet.</p>
+            <Link
+              href="/grievances"
+              className="inline-block text-teal-700 font-semibold hover:underline"
+            >
+              Report a civic sanitation issue in your street
+            </Link>
+          </div>
+        )}
+      </div>
+
+      {/* Citizen Resources */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Link
+          href="/live-detection"
+          className="p-5 bg-gradient-to-br from-teal-50 to-white rounded-2xl border border-teal-100 hover:border-teal-300 transition shadow-sm space-y-2 group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center">
+            <ScanEye className="w-4 h-4" />
+          </div>
+          <h4 className="text-xs font-bold text-slate-800 group-hover:text-teal-700">AI Waste Camera</h4>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Real-time computer vision classifier to check recyclability of plastic, paper, and food waste.
+          </p>
+        </Link>
+
+        <Link
+          href="/about-data"
+          className="p-5 bg-gradient-to-br from-sky-50 to-white rounded-2xl border border-sky-100 hover:border-sky-300 transition shadow-sm space-y-2 group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-sky-600 text-white flex items-center justify-center">
+            <Trash2 className="w-4 h-4" />
+          </div>
+          <h4 className="text-xs font-bold text-slate-800 group-hover:text-sky-700">GCC 3-Bin Guide</h4>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Official guidelines for separating Green (Wet), Blue (Dry), and Red (Hazardous) household bins.
+          </p>
+        </Link>
+
+        <Link
+          href="/environmental"
+          className="p-5 bg-gradient-to-br from-emerald-50 to-white rounded-2xl border border-emerald-100 hover:border-emerald-300 transition shadow-sm space-y-2 group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center">
+            <Leaf className="w-4 h-4" />
+          </div>
+          <h4 className="text-xs font-bold text-slate-800 group-hover:text-emerald-700">Environmental Savings</h4>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Calculate your household CO2e reduction, trees saved, and landfill diversion impact.
+          </p>
+        </Link>
+      </div>
     </div>
   );
 }
