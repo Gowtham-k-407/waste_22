@@ -6,6 +6,7 @@ pillow>=10.2.0
 python-multipart>=0.0.9
 requests>=2.31.0
 numpy>=1.26.4
+opencv-python-headless>=4.9.0
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 python-dotenv>=1.0.1

@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import io
 from typing import List, Dict, Any
 from datetime import datetime

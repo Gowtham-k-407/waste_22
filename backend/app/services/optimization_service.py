@@ -1,4 +1,4 @@
-﻿import math
+import math
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from app.models.geography import Ward

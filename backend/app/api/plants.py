@@ -1,7 +1,10 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db, get_staff_db
+from app.core.security import get_current_user_from_token
+from app.core.rbac import verify_facility_scope
+from app.models.user import User, AuthAuditLog
 from app.models.facility import SegregationPlant
 from app.schemas.common_schemas import PlantSchema
 
@@ -41,12 +44,44 @@ def get_plants(
     return results
 
 @router.put("/{plant_id}/status")
-def update_plant_status(plant_id: int, status: str, current_input: Optional[float] = None, db: Session = Depends(get_db)):
+def update_plant_status(
+    plant_id: int,
+    status: str,
+    current_input: Optional[float] = None,
+    current_user: User = Depends(get_current_user_from_token),
+    staff_db: Session = Depends(get_staff_db),
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_db)
+):
+    PLANT_STATUS_ROLES = {
+        "system_admin", "assistant_engineer", "environmental_engineer",
+        "solid_waste_management_officer", "waste_processing_plant_operator",
+        "plant_operator", "municipal_commissioner", "municipal_officer"
+    }
+    if current_user.role not in PLANT_STATUS_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied: Role '{current_user.role}' lacks authority to modify plant operating status."
+        )
+
     plant = db.query(SegregationPlant).filter(SegregationPlant.id == plant_id).first()
     if not plant:
         raise HTTPException(status_code=404, detail="Plant not found")
+
+    # Enforce facility scope for operators
+    verify_facility_scope(current_user, plant_id, staff_db)
+
     plant.status = status
     if current_input is not None:
         plant.current_input_tpd = current_input
     db.commit()
+
+    # Log audit event
+    audit = AuthAuditLog(
+        user_id=current_user.id,
+        action=f"plant_status_updated:{plant.name}:{status}"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
     return {"success": True, "message": f"Plant {plant.name} updated to {status}"}

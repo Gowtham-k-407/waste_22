@@ -1,8 +1,11 @@
 import json
-from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form, status
 from sqlalchemy.orm import Session
 from typing import List
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db
+from app.core.security import get_current_user_from_token
+from app.core.rbac import require_roles
+from app.models.user import User, AuthAuditLog
 from app.models.ai_model import AIModelVersion
 from app.schemas.common_schemas import AIModelSchema
 from app.services.training_service import (
@@ -11,13 +14,32 @@ from app.services.training_service import (
 
 router = APIRouter(prefix="/models", tags=["AI Model Management"])
 
+ADMIN_MODEL_ROLES = ["system_admin", "ai_admin"]
+STAFF_MODEL_ROLES = ["system_admin", "ai_admin", "municipal_officer", "waste_management_project_manager"]
+
 @router.get("/", response_model=List[AIModelSchema])
-def get_all_models(db: Session = Depends(get_db)):
+def get_all_models(
+    current_user: User = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    if current_user.role in ["public", "contributor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Model metrics are restricted to municipal engineers and administrators."
+        )
     models = db.query(AIModelVersion).order_by(AIModelVersion.id.desc()).all()
     return models
 
 @router.get("/comparison")
-def compare_models(db: Session = Depends(get_db)):
+def compare_models(
+    current_user: User = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    if current_user.role in ["public", "contributor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Candidate model comparison requires municipal engineering or admin role."
+        )
     prod = db.query(AIModelVersion).filter(AIModelVersion.status == "production").first()
     candidate = db.query(AIModelVersion).filter(AIModelVersion.status == "candidate").first()
 
@@ -66,15 +88,43 @@ def compare_models(db: Session = Depends(get_db)):
     }
 
 @router.post("/deploy")
-def deploy_model(candidate_version: str = Form("v2.2"), db: Session = Depends(get_db)):
+def deploy_model(
+    candidate_version: str = Form("v2.2"),
+    current_user: User = Depends(require_roles(ADMIN_MODEL_ROLES)),
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_db)
+):
     result = TrainingService.deploy_candidate_model(db, candidate_version)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    
+    # Audit log
+    audit = AuthAuditLog(
+        user_id=current_user.id,
+        action=f"model_deployed:{candidate_version}"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
     return result
 
 @router.post("/rollback")
-def rollback_model(target_version: str = Form(None), db: Session = Depends(get_db)):
+def rollback_model(
+    target_version: str = Form(None),
+    current_user: User = Depends(require_roles(ADMIN_MODEL_ROLES)),
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_db)
+):
     result = TrainingService.rollback_model(db, target_version)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+
+    # Audit log
+    audit = AuthAuditLog(
+        user_id=current_user.id,
+        action=f"model_rollback:{target_version or 'previous'}"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
     return result

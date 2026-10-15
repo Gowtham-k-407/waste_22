@@ -174,11 +174,8 @@ def confirm_and_submit(
         if payload and payload.get("sub"):
             current_user = user_db.query(User).filter(User.email == payload.get("sub")).first()
 
-    if not current_user:
-        current_user = user_db.query(User).filter(User.username == "admin").first()
-
     if current_user:
-        current_user.contribution_points += 20 if is_user_corrected else 10
+        current_user.contribution_points = (current_user.contribution_points or 0) + (20 if is_user_corrected else 10)
         user_db.commit()
 
     # If user opted to add to Personal AI Memory in Database A

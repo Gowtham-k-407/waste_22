@@ -13,7 +13,7 @@ from app.models.plant import SegregationPlant
 from app.models.alert import Alert
 from app.models.complaint import PublicComplaint, Notification, WeighbridgeRecord
 from app.models.iot import IoTDevice, DeviceTelemetry
-from app.core.security import get_current_user_optional, get_current_user
+from app.core.security import get_current_user_optional, get_current_user, get_current_user_from_token
 from app.core.rbac import GCC_STAFF_ROLES, get_role_info
 
 router = APIRouter(prefix="/staff", tags=["Municipal Staff Portal & Role-Specific Dashboards"])
@@ -41,31 +41,40 @@ def list_staff_profiles(
     department: Optional[str] = Query(None),
     ward_id: Optional[int] = Query(None),
     role_name: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user_from_token),
     staff_db: Session = Depends(get_staff_db),
     user_db: Session = Depends(get_user_db)
 ):
     """
     Returns municipal staff profiles from Database B (Staff DB) joined with User account metadata from Database A.
+    Restricted to GCC municipal personnel and administrators.
     """
+    if current_user.role in ["public", "contributor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Staff directory is restricted to GCC municipal staff and administrators."
+        )
+
     query = staff_db.query(StaffProfile)
     if department:
         query = query.filter(StaffProfile.department == department)
     if ward_id:
         query = query.filter(StaffProfile.assigned_ward_id == ward_id)
     if role_name:
-        query = query.filter(StaffProfile.role_title == role_name)
+        query = query.filter((StaffProfile.job_title == role_name) | (StaffProfile.role_code == role_name))
 
     profiles = query.order_by(StaffProfile.id.asc()).all()
     results = []
     for p in profiles:
         # Cross-database lookup in User DB
-        user = user_db.query(User).filter(User.id == p.user_account_id).first()
+        user = user_db.query(User).filter(User.id == p.user_id).first()
         results.append({
             "id": p.id,
             "employee_id": p.employee_id,
             "full_name": user.full_name if user else f"Officer {p.employee_id}",
             "email": user.email if user else None,
-            "role_title": p.role_title,
+            "role_title": p.job_title,
+            "role_code": p.role_code,
             "department": p.department,
             "assigned_ward_id": p.assigned_ward_id,
             "assigned_zone_number": p.assigned_zone_number,
@@ -79,25 +88,45 @@ def list_staff_profiles(
 
 @router.get("/dashboard")
 def get_staff_role_dashboard(
-    role_override: Optional[str] = Query(None, description="Preview dashboard for any of the 35 GCC roles"),
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    role_override: Optional[str] = Query(None, description="Preview dashboard for any of the 35 GCC roles (Admin only)"),
+    current_user: User = Depends(get_current_user_from_token),
     waste_db: Session = Depends(get_waste_db),
     staff_db: Session = Depends(get_staff_db)
 ):
     """
     Delivers a dedicated, tailored operational dashboard for each of the 35 GCC Municipal Staff roles.
     Includes role-specific KPIs, tasks, alerts, operational routes, and controls.
+    Non-admins are strictly restricted to their assigned server-side role.
     """
-    target_role = role_override or (current_user.role if current_user else "Municipal Commissioner")
+    if current_user.role in ["public", "contributor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Municipal staff credentials required to access the Staff Dashboard."
+        )
+
+    # Only System Administrator may preview other roles
+    if current_user.role == "system_admin":
+        target_role = role_override or "Municipal Commissioner"
+    else:
+        if role_override and role_override != current_user.role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: You cannot view dashboards for other municipal roles ({role_override}). You are assigned as '{current_user.role}'."
+            )
+        target_role = current_user.role
+
     role_info = get_role_info(target_role)
     if not role_info:
-        target_role = "Municipal Commissioner"
-        role_info = get_role_info(target_role)
+        target_role = current_user.role
+        role_info = get_role_info(target_role) or {
+            "department": "Municipal Operations",
+            "scope_level": "city_wide",
+            "description": f"GCC {target_role}",
+            "permissions": ["dashboard:view_operational"]
+        }
 
-    # Fetch staff profile if logged in
-    staff_profile = None
-    if current_user:
-        staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_account_id == current_user.id).first()
+    # Fetch staff profile from Database B
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
 
     assigned_ward = staff_profile.assigned_ward_id if staff_profile and staff_profile.assigned_ward_id else 102
     assigned_facility = staff_profile.assigned_facility_id if staff_profile and staff_profile.assigned_facility_id else 1

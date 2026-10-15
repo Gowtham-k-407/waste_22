@@ -29,13 +29,10 @@ def require_admin(
     user_db: Session = Depends(get_user_db)
 ) -> User:
     if not auth or not auth.credentials:
-        # Fallback to default admin user in Database A for local dev / backward compatibility if no header
-        admin_user = user_db.query(User).filter(User.role.in_(ADMIN_ROLES)).first()
-        if admin_user:
-            return admin_user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Admin authentication required. Please sign in to the Admin Portal."
+            detail="Admin authentication required. Please sign in to the Admin Portal.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     payload = decode_access_token(auth.credentials)

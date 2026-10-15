@@ -3,7 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
 from datetime import datetime
 
-from app.core.database import get_db
+from app.core.database import get_db, get_user_db
+from app.core.rbac import require_roles
+from app.models.user import User, AuthAuditLog
 from app.models.iot import IoTDevice, DeviceTelemetry
 from app.services.mqtt_service import process_telemetry_payload, get_connection_status
 from app.services.iot_simulator import IoTSimulatorService
@@ -129,14 +131,31 @@ def ingest_telemetry_webhook(
     return result
 
 
+ADMIN_IOT_ROLES = ["system_admin", "municipal_officer", "ai_admin"]
+
 @router.post("/simulator/start")
-def start_simulator(interval_seconds: float = Query(15.0, ge=2.0, le=120.0)):
-    return IoTSimulatorService.start(interval_seconds=interval_seconds)
+def start_simulator(
+    interval_seconds: float = Query(15.0, ge=2.0, le=120.0),
+    current_user: User = Depends(require_roles(ADMIN_IOT_ROLES)),
+    user_db: Session = Depends(get_user_db)
+):
+    result = IoTSimulatorService.start(interval_seconds=interval_seconds)
+    audit = AuthAuditLog(user_id=current_user.id, action="iot_simulator_started")
+    user_db.add(audit)
+    user_db.commit()
+    return result
 
 
 @router.post("/simulator/stop")
-def stop_simulator():
-    return IoTSimulatorService.stop()
+def stop_simulator(
+    current_user: User = Depends(require_roles(ADMIN_IOT_ROLES)),
+    user_db: Session = Depends(get_user_db)
+):
+    result = IoTSimulatorService.stop()
+    audit = AuthAuditLog(user_id=current_user.id, action="iot_simulator_stopped")
+    user_db.add(audit)
+    user_db.commit()
+    return result
 
 
 @router.get("/simulator/status")

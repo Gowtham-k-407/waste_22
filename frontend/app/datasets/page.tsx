@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 export default function DatasetManagementPage() {
   const [sources, setSources] = useState<any[]>([]);
@@ -56,8 +57,9 @@ export default function DatasetManagementPage() {
   };
 
   return (
-    <div className="space-y-8">
-      {/* Header */}
+    <ProtectedRoute allowedRoles={["system_admin", "ai_admin", "waste_management_data_analyst", "municipal_officer"]}>
+      <div className="space-y-8">
+        {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
@@ -238,6 +240,7 @@ export default function DatasetManagementPage() {
           </div>
         )}
       </section>
-    </div>
+      </div>
+    </ProtectedRoute>
   );
 }

@@ -217,6 +217,12 @@ def update_complaint_status(
     """
     Authorized municipal workflow to advance grievance resolution lifecycle.
     """
+    if current_user.role in ["public", "contributor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Only GCC municipal staff and administrators can update grievance status."
+        )
+
     complaint = waste_db.query(PublicComplaint).filter(PublicComplaint.id == complaint_id).first()
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found.")

@@ -246,16 +246,44 @@ def get_user_uploads(
 
 
 @router.get("/{upload_id}")
-def get_upload_detail(upload_id: int, db: Session = Depends(get_db)):
+def get_upload_detail(
+    upload_id: int,
+    auth: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
+    user_db: Session = Depends(get_user_db),
+    db: Session = Depends(get_db)
+):
     upload = db.query(Upload).filter(Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found.")
+
+    current_user = None
+    if auth and auth.credentials:
+        payload = decode_access_token(auth.credentials)
+        if payload and payload.get("sub"):
+            current_user = user_db.query(User).filter(User.email == payload.get("sub")).first()
+
+    is_admin = current_user and current_user.role in ["ai_admin", "system_admin", "municipal_officer", "municipal_commissioner", "solid_waste_management_officer"]
+    is_owner = current_user and upload.user_id == current_user.id
+
+    # If the upload is private/pending/rejected and requester is neither owner nor admin, deny access
+    if not (is_admin or is_owner):
+        if upload.status != "APPROVED_FOR_TRAINING":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: You do not have permission to access this private upload record."
+            )
+        # For public approved uploads, mask personal email and internal admin notes
+        user_email_val = None
+        admin_notes_val = None
+    else:
+        user_email_val = upload.user_email
+        admin_notes_val = upload.admin_notes
 
     return {
         "id": upload.id,
         "upload_id": upload.upload_id,
         "user_name": upload.user_name,
-        "user_email": upload.user_email,
+        "user_email": user_email_val,
         "original_filename": upload.original_filename,
         "image_url": upload.image_url,
         "file_size_bytes": upload.file_size_bytes,
@@ -271,7 +299,7 @@ def get_upload_detail(upload_id: int, db: Session = Depends(get_db)):
         "verified_category": upload.verified_category,
         "verified_label": upload.verified_label,
         "rejection_reason": upload.rejection_reason,
-        "admin_notes": upload.admin_notes,
+        "admin_notes": admin_notes_val,
         "created_at": upload.created_at.isoformat() if upload.created_at else None,
         "verified_at": upload.verified_at.isoformat() if upload.verified_at else None
     }

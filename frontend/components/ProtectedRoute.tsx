@@ -125,32 +125,15 @@ export function ProtectedRoute({
             </div>
           </div>
 
-          {/* Quick Persona Switcher for Evaluation */}
+          {/* Access Policy Notice */}
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
-            <p className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2 flex items-center">
+            <p className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1 flex items-center">
               <ShieldCheck className="w-4 h-4 text-teal-600 mr-1.5" />
-              Platform Evaluation Persona Switcher
+              Role-Based Access Enforcement
             </p>
-            <p className="text-xs text-slate-500 mb-3">
-              Need to test this feature? Switch your active role instantly to one of the authorized roles:
+            <p className="text-xs text-slate-500 leading-relaxed">
+              If your municipal job duty requires access to this operational module, please coordinate with your GCC Department Supervisor or the System Administrator to update your official staff profile.
             </p>
-            <div className="flex flex-wrap gap-2">
-              {allowedRoles.map((role) => (
-                <button
-                  key={role}
-                  onClick={() => switchRole(role)}
-                  className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-lg text-xs font-semibold transition-all"
-                >
-                  Switch to {ROLE_TITLES[role] || role}
-                </button>
-              ))}
-              <button
-                onClick={() => switchRole("system_admin")}
-                className="px-3 py-1.5 bg-navy-900 hover:bg-navy-800 text-white rounded-lg text-xs font-semibold transition-all"
-              >
-                Switch to System Admin
-              </button>
-            </div>
           </div>
 
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">

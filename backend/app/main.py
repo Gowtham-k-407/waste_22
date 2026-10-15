@@ -201,14 +201,19 @@ def health_check(db: Session = Depends(get_db)):
         "version": "2.2.0"
     }
 
-# Friendly global error handler for non-technical users
+# Safe global error handler avoiding information leakage
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None)
+        )
     return JSONResponse(
         status_code=500,
         content={
             "success": False,
-            "user_message": "Something went wrong while loading this municipal information. Please try again.",
-            "dev_details": str(exc)
+            "user_message": "An unexpected error occurred while processing the municipal request. Please try again or contact support."
         }
     )

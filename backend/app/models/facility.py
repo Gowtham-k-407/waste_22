@@ -1,4 +1,4 @@
-﻿from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text
 from app.core.database import Base
 
 class SegregationPlant(Base):

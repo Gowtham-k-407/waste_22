@@ -110,19 +110,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return updated;
   };
 
-  const switchRole = async (newRole: string) => {
+  const switchRole = async (newRole: string): Promise<void> => {
     try {
       const resp = await api.switchRole(newRole);
       if (resp && resp.user) {
         setUser(resp.user);
         localStorage.setItem("wastevision_user", JSON.stringify(resp.user));
-      } else if (user) {
-        const updated = { ...user, role: newRole as any };
-        setUser(updated);
-        localStorage.setItem("wastevision_user", JSON.stringify(updated));
+        if (resp.access_token) {
+          setToken(resp.access_token);
+          localStorage.setItem("wastevision_token", resp.access_token);
+        }
       }
-    } catch (e) {
-      console.error("Failed to switch role:", e);
+    } catch (e: any) {
+      console.error("Failed to switch role on server:", e);
+      // Never mutate local state when the server rejects authorization
+      throw e;
     }
   };
 

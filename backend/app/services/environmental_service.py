@@ -1,4 +1,4 @@
-﻿import math
+import math
 from typing import Dict, Any
 
 # CPCB & IPCC Solid Waste Model Constants for India

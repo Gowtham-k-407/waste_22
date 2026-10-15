@@ -5,13 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.core.database import get_user_db, get_waste_db
+from app.core.database import get_user_db, get_waste_db, get_staff_db
 from app.core.security import (
     hash_password, verify_password,
     create_access_token, get_current_user_from_token
 )
 from app.core.rbac import MUNICIPAL_STAFF_ROLES
 from app.models.user import User, PasswordResetToken, AuthAuditLog
+from app.models.staff import StaffProfile
 from app.models.contribution import ImageContribution
 from app.schemas.auth import (
     UserRegister, UserLogin, ForgotPasswordRequest,
@@ -317,22 +318,42 @@ def get_available_roles():
 def switch_user_role(
     req: RoleSwitchRequest,
     current_user: User = Depends(get_current_user_from_token),
+    staff_db: Session = Depends(get_staff_db),
     user_db: Session = Depends(get_user_db)
 ):
     """
-    Role switching is permitted ONLY for System Administrators or between public/contributor modes.
-    Public users cannot self-escalate to System Administrator or Staff roles.
+    Role switching is strictly validated against server-side eligibility:
+    - System Administrators can preview any role or return to system_admin.
+    - Staff members can switch only to their assigned server-side role, or public/contributor modes.
+    - Public/contributor users cannot self-escalate to any municipal staff or administrative role.
+    Upon successful role change, a freshly signed session JWT with the updated role is issued.
     """
     valid_roles = list(MUNICIPAL_STAFF_ROLES.keys()) + ["system_admin", "public", "contributor", "ai_admin", "municipal_officer", "plant_operator"]
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
-    # Enforce authorization: Non-admins cannot switch to staff or admin roles
-    if current_user.role != "system_admin":
-        if req.role in MUNICIPAL_STAFF_ROLES or req.role in ["system_admin", "ai_admin", "municipal_officer", "plant_operator"]:
+    # Check server-side staff profile assignment
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
+
+    # Determine permitted roles for this user
+    if current_user.role == "system_admin" or (staff_profile and staff_profile.role_code == "system_admin"):
+        # System Admin has global test switching capabilities
+        pass
+    elif staff_profile:
+        # User is an authorized staff member; they can switch between their assigned role and citizen modes
+        allowed_roles_for_user = {staff_profile.role_code, "contributor", "public"}
+        if req.role not in allowed_roles_for_user:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Privilege escalation prohibited: Only System Administrators can assign staff or administrative roles."
+                detail=f"Access denied: Your assigned municipal staff role is '{staff_profile.role_code}'. You cannot self-escalate to '{req.role}'."
+            )
+    else:
+        # Ordinary citizen/contributor user
+        allowed_roles_for_user = {"public", "contributor"}
+        if req.role not in allowed_roles_for_user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Privilege escalation prohibited: Role '{req.role}' requires municipal verification. Public users cannot self-assign staff or admin roles."
             )
 
     current_user.role = req.role
@@ -340,12 +361,17 @@ def switch_user_role(
     user_db.commit()
     user_db.refresh(current_user)
 
+    # Issue new access token with updated role claim
+    new_token = create_access_token({"sub": current_user.email, "role": current_user.role, "name": current_user.full_name})
+
     audit = AuthAuditLog(user_id=current_user.id, action=f"role_switched_to_{req.role}")
     user_db.add(audit)
     user_db.commit()
 
     return {
         "success": True,
+        "access_token": new_token,
+        "token_type": "bearer",
         "active_role": req.role,
         "user": current_user,
         "message": f"Active role updated to {req.role}"

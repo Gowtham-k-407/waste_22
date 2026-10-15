@@ -12,26 +12,42 @@ import {
   Check
 } from "lucide-react";
 import { api } from "@/lib/api";
+import Link from "next/link";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
+import { useAuth } from "@/lib/auth-context";
+
+const ALERT_RESOLVE_ROLES = [
+  "system_admin", "assistant_engineer", "sanitary_officer",
+  "municipal_control_room_operator", "waste_management_inspection_officer",
+  "solid_waste_management_officer", "municipal_commissioner", "municipal_officer"
+];
 
 export default function AlertsPage() {
+  const { user, isAuthenticated } = useAuth();
   const [alerts, setAlerts] = useState<any[]>([]);
   const [priorityFilter, setPriorityFilter] = useState<string>("all");
   const [resolvingId, setResolvingId] = useState<number | null>(null);
   const [resolvedIds, setResolvedIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const canResolve = Boolean(
+    user && (user.role === "system_admin" || ALERT_RESOLVE_ROLES.includes(user.role))
+  );
 
   useEffect(() => {
     loadAlerts();
-  }, [priorityFilter]);
+  }, [priorityFilter, user]);
 
   async function loadAlerts() {
     try {
       setLoading(true);
+      setErrorMessage(null);
       const data = await api.getAlerts(priorityFilter === "all" ? undefined : priorityFilter);
-      setAlerts(data);
-    } catch (err) {
+      setAlerts(Array.isArray(data) ? data : []);
+    } catch (err: any) {
       console.error(err);
+      setErrorMessage(err.message || "Failed to load operational alerts.");
     } finally {
       setLoading(false);
     }
@@ -42,8 +58,9 @@ export default function AlertsPage() {
       setResolvingId(id);
       await api.resolveAlert(id);
       setResolvedIds([...resolvedIds, id]);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      alert(err.message || "Failed to resolve alert: Insufficient permissions.");
     } finally {
       setResolvingId(null);
     }
@@ -87,6 +104,22 @@ export default function AlertsPage() {
           </p>
         </div>
       </div>
+
+      {/* Permission Restriction Notice if access denied */}
+      {errorMessage && (
+        <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <Link
+            href="/login"
+            className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-center transition"
+          >
+            Sign In with GCC Staff Credentials
+          </Link>
+        </div>
+      )}
 
       {/* Priority Filter Bar */}
       <div className="flex items-center gap-2 bg-white p-3 rounded-xl border border-slate-200 shadow-sm text-xs overflow-x-auto">
@@ -160,27 +193,25 @@ export default function AlertsPage() {
                   <p className="text-slate-800 font-medium">{alert.recommended_action}</p>
                 </div>
 
-                <button
-                  onClick={() => handleResolve(alert.id)}
-                  disabled={isResolved || resolvingId === alert.id}
-                  className={`px-4 py-2 rounded-lg font-bold text-xs transition flex items-center justify-center gap-1.5 whitespace-nowrap ${
-                    isResolved
-                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-default"
-                      : "bg-navy-900 hover:bg-navy-950 text-white shadow-sm"
-                  }`}
-                >
-                  {isResolved ? (
-                    <>
-                      <Check className="w-4 h-4" />
-                      <span>Incident Resolved</span>
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Acknowledge & Resolve</span>
-                    </>
-                  )}
-                </button>
+                {isResolved ? (
+                  <span className="px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap">
+                    <Check className="w-4 h-4" />
+                    <span>Incident Resolved</span>
+                  </span>
+                ) : canResolve ? (
+                  <button
+                    onClick={() => handleResolve(alert.id)}
+                    disabled={resolvingId === alert.id}
+                    className="px-4 py-2 bg-navy-900 hover:bg-navy-950 text-white shadow-sm rounded-lg font-bold text-xs transition flex items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>{resolvingId === alert.id ? "Resolving..." : "Acknowledge & Resolve"}</span>
+                  </button>
+                ) : (
+                  <span className="px-3 py-1.5 bg-slate-100 text-slate-500 border border-slate-200 rounded-lg text-xs font-medium whitespace-nowrap" title="Resolution restricted to GCC municipal staff">
+                    Restricted to GCC Operators
+                  </span>
+                )}
               </div>
             </div>
           );
