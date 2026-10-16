@@ -1,5 +1,5 @@
 import logging
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from app.core.config import settings
 
@@ -9,7 +9,7 @@ def create_db_engine(url: str, name: str):
     is_sqlite = "sqlite" in url.lower()
     engine_kwargs = {}
     if is_sqlite:
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
+        engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 15}
     else:
         engine_kwargs.update({
             "pool_pre_ping": True,
@@ -20,12 +20,31 @@ def create_db_engine(url: str, name: str):
         })
     try:
         eng = create_engine(url, **engine_kwargs)
+        if is_sqlite:
+            @event.listens_for(eng, "connect")
+            def set_sqlite_pragma(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA synchronous=NORMAL")
+                    cursor.execute("PRAGMA busy_timeout=5000")
+                finally:
+                    cursor.close()
         return eng, is_sqlite
     except Exception as e:
         logger.error(f"Failed to initialize {name} engine with URL {url}: {e}")
         # Safe fallback to local SQLite for development
         fallback_url = f"sqlite:///./{name.lower()}.db"
-        eng = create_engine(fallback_url, connect_args={"check_same_thread": False})
+        eng = create_engine(fallback_url, connect_args={"check_same_thread": False, "timeout": 15})
+        @event.listens_for(eng, "connect")
+        def set_sqlite_pragma_fb(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+            finally:
+                cursor.close()
         return eng, True
 
 # -------------------------------------------------------------

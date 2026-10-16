@@ -46,7 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Load user and token from localStorage on mount
   useEffect(() => {
-    const initAuth = async () => {
+    const initAuth = () => {
       try {
         const storedToken = localStorage.getItem("wastevision_token");
         const storedUser = localStorage.getItem("wastevision_user");
@@ -54,16 +54,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (storedToken && storedUser) {
           setToken(storedToken);
           setUser(JSON.parse(storedUser));
-          // Silently refresh current user in background
-          try {
-            const currentUser = await api.getCurrentUser();
-            if (currentUser) {
-              setUser(currentUser);
-              localStorage.setItem("wastevision_user", JSON.stringify(currentUser));
-            }
-          } catch (e) {
-            console.warn("Could not silently refresh user session:", e);
-          }
+          setLoading(false);
+
+          // Non-blocking background session revalidation
+          api.getCurrentUser()
+            .then((currentUser) => {
+              if (currentUser) {
+                setUser(currentUser);
+                localStorage.setItem("wastevision_user", JSON.stringify(currentUser));
+              }
+            })
+            .catch((e) => {
+              console.warn("Background session revalidation:", e);
+            });
+          return;
         }
       } catch (err) {
         console.error("Failed to initialize auth state:", err);

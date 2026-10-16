@@ -1,7 +1,23 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "https://waste-22.onrender.com/api";
+function getApiBaseUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "http://localhost:8000/api";
+    }
+  }
+  return "https://waste-22.onrender.com/api";
+}
+
+export function getBaseApiUrl(): string {
+  return getApiBaseUrl();
+}
 
 export async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const baseUrl = getApiBaseUrl();
+  const url = `${baseUrl}${endpoint}`;
   
   // Attach token if present in browser
   const headers: Record<string, string> = {
@@ -15,12 +31,20 @@ export async function fetchApi<T>(endpoint: string, options?: RequestInit): Prom
     }
   }
 
+  const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+
   try {
     const res = await fetch(url, {
       ...options,
       headers,
       cache: "no-store",
     });
+
+    const elapsed = Math.round((typeof performance !== "undefined" ? performance.now() : Date.now()) - t0);
+    const serverTiming = res.headers.get("Server-Timing");
+    if (serverTiming) {
+      console.debug(`[HTTP] ${options?.method || "GET"} ${endpoint} -> ${res.status} (${elapsed}ms) | Server: ${serverTiming}`);
+    }
 
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}));

@@ -599,6 +599,15 @@ def seed_all_databases():
     waste_db = WasteSessionLocal()
 
     try:
+        user_count = user_db.query(User).count()
+        staff_count = staff_db.query(StaffProfile).count()
+        ward_count = waste_db.query(Ward).count()
+
+        if user_count > 0 and staff_count > 0 and ward_count > 0:
+            logger.info("Databases already populated; performing fast bootstrap verification.")
+            seed_database_a(user_db)
+            return
+
         seed_database_a(user_db)
         seed_database_b(staff_db, user_db)
         waste_db = WasteSessionLocal()

@@ -32,7 +32,7 @@ import { MetricTooltip } from "@/components/MetricTooltip";
 import { AssignedTruckMiniMapModal } from "@/components/AssignedTruckMiniMapModal";
 
 export default function HomePage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const isPublicUser = user && ["public", "contributor"].includes(user.role);
 
   const [summary, setSummary] = useState<any>(null);
@@ -40,7 +40,6 @@ export default function HomePage() {
   const [publicData, setPublicData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
 
   async function loadData() {
     try {
@@ -65,10 +64,11 @@ export default function HomePage() {
   }
 
   useEffect(() => {
+    if (authLoading) return;
     loadData();
-  }, [isPublicUser]);
+  }, [authLoading, isPublicUser]);
 
-  if (loading) {
+  if (loading || authLoading) {
     return (
       <div className="space-y-6 animate-pulse">
         <div className="h-20 bg-slate-200 rounded-xl"></div>

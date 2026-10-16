@@ -2,7 +2,7 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -75,14 +75,48 @@ def register_user(req: UserRegister, user_db: Session = Depends(get_user_db)):
         "user": new_user
     }
 
-@router.post("/login", response_model=TokenResponse)
-def login_user(req: UserLogin, user_db: Session = Depends(get_user_db)):
-    email_or_user = req.email.strip().lower()
-    user = user_db.query(User).filter(
-        (func.lower(User.email) == email_or_user) | (func.lower(User.username) == email_or_user)
-    ).first()
+import time
+import logging
 
-    if not user or not verify_password(req.password, user.hashed_password):
+logger = logging.getLogger("wastedash.auth")
+
+@router.post("/login", response_model=TokenResponse)
+def login_user(
+    req: UserLogin,
+    response: Response,
+    user_db: Session = Depends(get_user_db)
+):
+    """
+    High-performance authentication endpoint with instrumented stage timings.
+    - Uses indexed lookup on unique email/username.
+    - PBKDF2-SHA256 password hash verification.
+    - Single transaction commit for login audit and timestamp.
+    - Issues signed JWT access token.
+    - Emits W3C Server-Timing header for transparent observability.
+    """
+    t_start = time.perf_counter()
+
+    email_or_user = req.email.strip().lower()
+
+    # 1. Database Connection & User Lookup (Index-friendly)
+    t_lookup_start = time.perf_counter()
+    if "@" in email_or_user:
+        user = user_db.query(User).filter(User.email == email_or_user).first()
+    else:
+        user = user_db.query(User).filter(User.username == email_or_user).first()
+    if not user:
+        # Fallback to combined lookup if user entered an unusual format
+        user = user_db.query(User).filter(
+            (User.email == email_or_user) | (User.username == email_or_user)
+        ).first()
+    dur_lookup_ms = (time.perf_counter() - t_lookup_start) * 1000
+
+    # 2. Password Hash Verification
+    t_verify_start = time.perf_counter()
+    pw_matches = verify_password(req.password, user.hashed_password) if user else False
+    dur_verify_ms = (time.perf_counter() - t_verify_start) * 1000
+
+    if not user or not pw_matches:
         if user:
             audit = AuthAuditLog(user_id=user.id, action="login_failure")
             user_db.add(audit)
@@ -92,19 +126,43 @@ def login_user(req: UserLogin, user_db: Session = Depends(get_user_db)):
             detail="The email or password you entered is incorrect. Please try again."
         )
 
+    # 3. Account Status Check
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your account has been deactivated. Please contact the administrator."
         )
 
+    # 4. Audit Log & Last Login Commit
+    t_commit_start = time.perf_counter()
     user.last_login_at = datetime.now(timezone.utc)
     audit = AuthAuditLog(user_id=user.id, action="login_success")
     user_db.add(audit)
     user_db.commit()
+    dur_commit_ms = (time.perf_counter() - t_commit_start) * 1000
 
+    # 5. Token Generation
+    t_token_start = time.perf_counter()
     expire_delta = timedelta(days=30) if req.remember_me else timedelta(days=7)
     token = create_access_token({"sub": user.email, "role": user.role}, expires_delta=expire_delta)
+    dur_token_ms = (time.perf_counter() - t_token_start) * 1000
+
+    dur_total_ms = (time.perf_counter() - t_start) * 1000
+
+    # W3C Server-Timing header for transparent performance inspection
+    response.headers["Server-Timing"] = (
+        f"db_lookup;dur={dur_lookup_ms:.2f}, "
+        f"hash_verify;dur={dur_verify_ms:.2f}, "
+        f"db_commit;dur={dur_commit_ms:.2f}, "
+        f"token_gen;dur={dur_token_ms:.2f}, "
+        f"total;dur={dur_total_ms:.2f}"
+    )
+
+    logger.info(
+        f"[AUTH_PERF] login user_id={user.id} role={user.role} "
+        f"lookup={dur_lookup_ms:.2f}ms verify={dur_verify_ms:.2f}ms "
+        f"commit={dur_commit_ms:.2f}ms token={dur_token_ms:.2f}ms total={dur_total_ms:.2f}ms"
+    )
 
     return {
         "access_token": token,

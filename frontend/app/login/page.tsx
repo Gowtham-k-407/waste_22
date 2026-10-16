@@ -21,25 +21,46 @@ function LoginContent() {
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [isSlowResponseNotice, setIsSlowResponseNotice] = useState(false);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage("");
+    // Guard against duplicate submission
+    if (loading) return;
 
-    if (!email.trim() || !password) {
+    setErrorMessage("");
+    setIsSlowResponseNotice(false);
+
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) {
       setErrorMessage("Please enter both your email address and password.");
       return;
     }
 
     setLoading(true);
+    const t0 = performance.now();
+
+    // Cold-start notification timer for Render free-tier latency
+    const coldStartTimer = setTimeout(() => {
+      setIsSlowResponseNotice(true);
+    }, 4500);
+
     try {
-      await login(email.trim(), password, rememberMe);
+      await login(cleanEmail, password, rememberMe);
+      clearTimeout(coldStartTimer);
+      const elapsed = Math.round(performance.now() - t0);
+      console.info(`[Auth Performance] Login succeeded in ${elapsed}ms`);
       router.push(redirectUrl);
     } catch (err: any) {
+      clearTimeout(coldStartTimer);
+      setIsSlowResponseNotice(false);
+      const elapsed = Math.round(performance.now() - t0);
+      console.warn(`[Auth Performance] Login failed after ${elapsed}ms:`, err);
       setErrorMessage(
         err.message || "The email or password you entered is incorrect. Please try again."
       );
     } finally {
+      clearTimeout(coldStartTimer);
       setLoading(false);
     }
   };
@@ -74,6 +95,18 @@ function LoginContent() {
             </div>
           )}
 
+          {isSlowResponseNotice && (
+            <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-xl p-3.5 flex items-start space-x-2.5 animate-pulse">
+              <Sparkles className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold">Waking up cloud service...</span>
+                <p className="mt-0.5 text-amber-700">
+                  The backend service on Render free-tier spins down after inactivity. Cold starts can take 30–60 seconds on initial wake-up. Subsequent logins will be instant.
+                </p>
+              </div>
+            </div>
+          )}
+
           <form onSubmit={handleLogin} className="space-y-5">
             {/* Email Field */}
             <div>
@@ -87,10 +120,11 @@ function LoginContent() {
                 <input
                   type="email"
                   required
+                  disabled={loading}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@chennaiswm.gov.in"
-                  className="block w-full pl-10 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition-all"
+                  className="block w-full pl-10 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition-all disabled:opacity-60"
                 />
               </div>
             </div>
@@ -115,10 +149,11 @@ function LoginContent() {
                 <input
                   type={showPassword ? "text" : "password"}
                   required
+                  disabled={loading}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="block w-full pl-10 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition-all"
+                  className="block w-full pl-10 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-sm placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition-all disabled:opacity-60"
                 />
                 <button
                   type="button"
