@@ -20,10 +20,27 @@ const ROLE_DISPLAY: Record<string, { label: string; color: string }> = {
 };
 
 export default function ProfilePage() {
-  const { user, updateProfile, switchRole, logout } = useAuth();
+  const { user, updateProfile, switchRole, restoreSession, logout } = useAuth();
+
+  const handlePersonaSwitch = async (roleKey: string) => {
+    try {
+      if (roleKey === "system_admin") {
+        try {
+          await restoreSession();
+        } catch {
+          await switchRole(roleKey);
+        }
+      } else {
+        await switchRole(roleKey);
+      }
+    } catch (e: any) {
+      console.error("Persona switch failed:", e);
+    }
+  };
 
   // Profile form state
   const [fullName, setFullName] = useState("");
+
   const [organization, setOrganization] = useState("");
   const [city, setCity] = useState("Chennai");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -449,7 +466,7 @@ export default function ProfilePage() {
             {Object.entries(ROLE_DISPLAY).map(([roleKey, { label }]) => (
               <button
                 key={roleKey}
-                onClick={() => switchRole(roleKey)}
+                onClick={() => handlePersonaSwitch(roleKey)}
                 className={`p-3 rounded-xl border text-xs font-semibold text-center transition-all ${
                   user?.role === roleKey
                     ? "bg-teal-600 text-white border-teal-600 shadow-sm"

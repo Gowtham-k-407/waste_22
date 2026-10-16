@@ -29,6 +29,7 @@ import { useAuth } from "@/lib/auth-context";
 import { MetricCard } from "@/components/MetricCard";
 import { DataProvenanceBadge } from "@/components/DataProvenanceBadge";
 import { MetricTooltip } from "@/components/MetricTooltip";
+import { AssignedTruckMiniMapModal } from "@/components/AssignedTruckMiniMapModal";
 
 export default function HomePage() {
   const { user } = useAuth();
@@ -39,6 +40,7 @@ export default function HomePage() {
   const [publicData, setPublicData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
 
   async function loadData() {
     try {
@@ -436,6 +438,7 @@ export default function HomePage() {
 
 function ResidentDashboardView({ publicData }: { publicData: any }) {
   const { user, collection_schedule, assigned_truck, ward_stats, my_grievances } = publicData;
+  const [truckModalOpen, setTruckModalOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -505,19 +508,43 @@ function ResidentDashboardView({ publicData }: { publicData: any }) {
         </div>
 
         {/* Assigned Collection Truck */}
-        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+        <div
+          onClick={() => setTruckModalOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setTruckModalOpen(true);
+            }
+          }}
+          tabIndex={0}
+          role="button"
+          aria-label="View assigned collection truck live interactive map"
+          className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3 cursor-pointer hover:shadow-md hover:border-sky-300 transition-all group focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+        >
           <div className="flex items-center justify-between">
-            <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center group-hover:bg-sky-600 group-hover:text-white transition-colors">
               <Truck className="w-5 h-5" />
             </div>
-            <span className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full uppercase ${
-              assigned_truck?.assigned ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-600"
-            }`}>
-              {assigned_truck?.status}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className={`px-2.5 py-0.5 text-[10px] font-bold rounded-full uppercase ${
+                assigned_truck?.assigned ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-600"
+              }`}>
+                {assigned_truck?.status}
+              </span>
+              <span className="p-1 text-slate-400 group-hover:text-sky-600 transition" title="Open Interactive Map">
+                <MapPin className="w-3.5 h-3.5" />
+              </span>
+            </div>
           </div>
           <div>
-            <h3 className="text-sm font-bold text-slate-800">Assigned Collection Truck</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-800 group-hover:text-sky-700 transition">
+                Assigned Collection Truck
+              </h3>
+              <span className="text-[10px] font-bold text-sky-600 opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5">
+                Live Map <ArrowRight className="w-3 h-3 inline" />
+              </span>
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">
               {assigned_truck?.assigned ? assigned_truck.vehicle_type : "No active truck in ward"}
             </p>
@@ -540,13 +567,22 @@ function ResidentDashboardView({ publicData }: { publicData: any }) {
                   {assigned_truck.data_mode} ({assigned_truck.is_stale ? "Stale Signal" : "Scheduled Dispatch"})
                 </span>
               </div>
+              <div className="pt-1 flex items-center justify-center text-[11px] font-bold text-sky-600 bg-sky-50/70 py-1 rounded-lg border border-sky-100 group-hover:bg-sky-100 transition">
+                <MapPin className="w-3.5 h-3.5 mr-1" /> Click to open live interactive map
+              </div>
             </div>
           ) : (
-            <p className="text-xs text-slate-500 pt-2 border-t border-slate-100">
-              No municipal truck is currently dispatched to your ward for this shift.
-            </p>
+            <div className="pt-2 border-t border-slate-100 space-y-1.5">
+              <p className="text-xs text-slate-500">
+                No municipal truck is currently dispatched to your ward for this shift.
+              </p>
+              <div className="flex items-center justify-center text-[11px] font-bold text-sky-600 bg-sky-50/70 py-1 rounded-lg border border-sky-100 group-hover:bg-sky-100 transition">
+                <MapPin className="w-3.5 h-3.5 mr-1" /> Click to view ward area map
+              </div>
+            </div>
           )}
         </div>
+
 
         {/* Ward Waste Performance */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
@@ -672,6 +708,14 @@ function ResidentDashboardView({ publicData }: { publicData: any }) {
           </p>
         </Link>
       </div>
+
+      {/* Interactive Mini-Map Modal */}
+      <AssignedTruckMiniMapModal
+        isOpen={truckModalOpen}
+        onClose={() => setTruckModalOpen(false)}
+        wardNumber={user?.assigned_ward}
+        initialTruckData={publicData?.assigned_truck}
+      />
     </div>
   );
 }

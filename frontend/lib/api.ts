@@ -349,6 +349,45 @@ export const api = {
     return fetchApi<any>(`/admin/users${query}`);
   },
   getAdminUserDetail: (userId: number) => fetchApi<any>(`/admin/users/${userId}`),
+  createAdminUser: (data: {
+    full_name: string;
+    email: string;
+    username?: string;
+    role?: string;
+    organization?: string;
+    city?: string;
+    phone_number?: string;
+    assigned_ward?: number;
+    is_active?: boolean;
+    employee_id?: string;
+    department?: string;
+    job_title?: string;
+  }) =>
+    fetchApi<any>("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  updateAdminUser: (
+    userId: number,
+    data: {
+      full_name?: string;
+      organization?: string;
+      city?: string;
+      phone_number?: string;
+      assigned_ward?: number;
+      is_active?: boolean;
+    }
+  ) =>
+    fetchApi<any>(`/admin/users/${userId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  resetUserPasswordByAdmin: (userId: number) =>
+    fetchApi<any>(`/admin/users/${userId}/reset-password`, {
+      method: "POST",
+    }),
   updateUserRole: (userId: number, data: { role: string; reason?: string }) =>
     fetchApi<any>(`/admin/users/${userId}/role`, {
       method: "PUT",
@@ -372,6 +411,8 @@ export const api = {
   // Public Resident Area Dashboard & Truck
   getPublicDashboard: () => fetchApi<any>("/public/dashboard"),
   getAssignedTruck: () => fetchApi<any>("/public/assigned-truck"),
+  getAssignedTruckLocation: () => fetchApi<any>("/public/assigned-truck/location"),
+
 
   // Sanitation Grievance Redressal
   getComplaints: (params?: { status?: string; category?: string; ward_id?: number }) => {

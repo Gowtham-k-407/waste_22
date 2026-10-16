@@ -27,7 +27,14 @@ import {
   Award,
   Sparkles,
   Lock,
-  ArrowRight
+  ArrowRight,
+  UserPlus,
+  KeyRound,
+  UserCog,
+  Copy,
+  Check,
+  ExternalLink,
+  MapPin
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -44,6 +51,7 @@ interface UserAdminItem {
   phone_number?: string;
   is_active: boolean;
   email_verified: boolean;
+  must_change_password?: boolean;
   contribution_points: number;
   badges: string;
   created_at: string;
@@ -111,6 +119,53 @@ export default function AdminUsersPage() {
   const [confirmSafetyChecked, setConfirmSafetyChecked] = useState(false);
   const [isUpdatingRole, setIsUpdatingRole] = useState(false);
 
+  // Add User Modal State
+  const [addUserModalOpen, setAddUserModalOpen] = useState(false);
+  const [newUserData, setNewUserData] = useState({
+    full_name: "",
+    email: "",
+    username: "",
+    role: "contributor",
+    organization: "",
+    city: "Chennai",
+    phone_number: "",
+    assigned_ward: "",
+    is_active: true,
+    employee_id: "",
+    department: "",
+    job_title: ""
+  });
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+
+  // Edit User Details Modal State
+  const [editModalUser, setEditModalUser] = useState<UserAdminItem | null>(null);
+  const [editFormData, setEditFormData] = useState({
+    full_name: "",
+    organization: "",
+    city: "Chennai",
+    phone_number: "",
+    assigned_ward: "",
+    is_active: true
+  });
+  const [isUpdatingDetails, setIsUpdatingDetails] = useState(false);
+
+  // Password Reset Modal State
+  const [resetModalUser, setResetModalUser] = useState<UserAdminItem | null>(null);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+
+  // Token Link Modal (Activation or Reset Link Presentation)
+  const [tokenResultModal, setTokenResultModal] = useState<{
+    title: string;
+    subtitle: string;
+    targetEmail: string;
+    token: string;
+    url: string;
+    emailDeliveryStatus: string;
+  } | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  const isSystemAdmin = currentUser?.role === "system_admin";
+
   const fetchRoles = useCallback(async () => {
     try {
       const data = await api.getAdminRoles();
@@ -158,6 +213,7 @@ export default function AdminUsersPage() {
     fetchUsers(1);
   };
 
+  // Role Modal Handlers
   const handleOpenRoleModal = (u: UserAdminItem) => {
     setRoleModalUser(u);
     setTargetRole(u.role);
@@ -198,7 +254,197 @@ export default function AdminUsersPage() {
     }
   };
 
-  const isSystemAdmin = currentUser?.role === "system_admin";
+  // Add User Handlers
+  const handleOpenAddUser = () => {
+    setNewUserData({
+      full_name: "",
+      email: "",
+      username: "",
+      role: "contributor",
+      organization: "",
+      city: "Chennai",
+      phone_number: "",
+      assigned_ward: "",
+      is_active: true,
+      employee_id: "",
+      department: "",
+      job_title: ""
+    });
+    setAddUserModalOpen(true);
+  };
+
+  const handleCreateUserSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newUserData.full_name.trim() || !newUserData.email.trim()) {
+      setNotification({ type: "error", message: "Full Name and Email are required." });
+      return;
+    }
+
+    setIsCreatingUser(true);
+    setNotification(null);
+
+    try {
+      const payload: any = {
+        full_name: newUserData.full_name.trim(),
+        email: newUserData.email.trim(),
+        role: newUserData.role,
+        organization: newUserData.organization.trim() || undefined,
+        city: newUserData.city.trim() || "Chennai",
+        phone_number: newUserData.phone_number.trim() || undefined,
+        is_active: newUserData.is_active,
+      };
+
+      if (newUserData.username.trim()) {
+        payload.username = newUserData.username.trim();
+      }
+      if (newUserData.assigned_ward.trim()) {
+        payload.assigned_ward = parseInt(newUserData.assigned_ward.trim(), 10);
+      }
+      if (newUserData.employee_id.trim()) {
+        payload.employee_id = newUserData.employee_id.trim();
+      }
+      if (newUserData.department.trim()) {
+        payload.department = newUserData.department.trim();
+      }
+      if (newUserData.job_title.trim()) {
+        payload.job_title = newUserData.job_title.trim();
+      }
+
+      const res = await api.createAdminUser(payload);
+      setAddUserModalOpen(false);
+
+      if (res.activation_token) {
+        setTokenResultModal({
+          title: "User Account Created",
+          subtitle: `Account for ${res.user.full_name} has been provisioned. A secure, single-use activation invitation has been generated.`,
+          targetEmail: res.user.email,
+          token: res.activation_token,
+          url: `${window.location.origin}${res.activation_url}`,
+          emailDeliveryStatus: res.email_delivery_status || "not_configured"
+        });
+      } else {
+        setNotification({
+          type: "success",
+          message: `User '${res.user.username}' created successfully.`,
+        });
+      }
+
+      fetchUsers(1);
+    } catch (err: any) {
+      console.error("Create user failed:", err);
+      setNotification({
+        type: "error",
+        message: err.message || "Failed to create user. Verify email uniqueness and authorized role.",
+      });
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  // Edit User Details Handlers
+  const handleOpenEditModal = (u: UserAdminItem) => {
+    setEditModalUser(u);
+    setEditFormData({
+      full_name: u.full_name || "",
+      organization: u.organization || "",
+      city: u.city || "Chennai",
+      phone_number: u.phone_number || "",
+      assigned_ward: u.assigned_ward ? u.assigned_ward.toString() : "",
+      is_active: u.is_active
+    });
+  };
+
+  const handleSaveUserDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editModalUser) return;
+
+    setIsUpdatingDetails(true);
+    setNotification(null);
+
+    try {
+      const payload: any = {
+        full_name: editFormData.full_name.trim(),
+        organization: editFormData.organization.trim(),
+        city: editFormData.city.trim(),
+        phone_number: editFormData.phone_number.trim(),
+        is_active: editFormData.is_active
+      };
+
+      if (editFormData.assigned_ward.trim()) {
+        payload.assigned_ward = parseInt(editFormData.assigned_ward.trim(), 10);
+      }
+
+      const res = await api.updateAdminUser(editModalUser.id, payload);
+
+      setNotification({
+        type: "success",
+        message: `Successfully updated details for ${res.full_name}.`,
+      });
+      setEditModalUser(null);
+      if (selectedUser?.id === editModalUser.id) {
+        setSelectedUser(res);
+      }
+      fetchUsers(currentPage);
+    } catch (err: any) {
+      console.error("Failed to update user details:", err);
+      setNotification({
+        type: "error",
+        message: err.message || "Failed to update user details. Ensure safety restrictions are met.",
+      });
+    } finally {
+      setIsUpdatingDetails(false);
+    }
+  };
+
+  // Password Reset Handlers
+  const handleOpenResetModal = (u: UserAdminItem) => {
+    setResetModalUser(u);
+  };
+
+  const handleConfirmPasswordReset = async () => {
+    if (!resetModalUser) return;
+
+    setIsResettingPassword(true);
+    setNotification(null);
+
+    try {
+      const res = await api.resetUserPasswordByAdmin(resetModalUser.id);
+      setResetModalUser(null);
+
+      setTokenResultModal({
+        title: "Password Reset Initiated",
+        subtitle: `A single-use password reset token has been issued for ${resetModalUser.full_name}.`,
+        targetEmail: res.email,
+        token: res.reset_token,
+        url: `${window.location.origin}${res.reset_url}`,
+        emailDeliveryStatus: res.email_delivery_status || "not_configured"
+      });
+    } catch (err: any) {
+      console.error("Password reset failed:", err);
+      setNotification({
+        type: "error",
+        message: err.message || "Failed to initiate password reset. Administrative authorization required.",
+      });
+    } finally {
+      setIsResettingPassword(false);
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2500);
+  };
+
+  const isMunicipalStaffRole = (role: string) => {
+    return role.startsWith("staff_") || [
+      "waste_processing_plant_operator",
+      "sanitary_officer",
+      "municipal_commissioner",
+      "environmental_engineer",
+      "assistant_engineer"
+    ].includes(role);
+  };
 
   return (
     <div className="space-y-6">
@@ -214,7 +460,7 @@ export default function AdminUsersPage() {
             </div>
             <div>
               <h1 className="text-xl font-black text-navy-950 tracking-tight">
-                User Directory & Role Management
+                User Directory & Access Management
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
                 Authorized Municipal Administrative Directory with Role-Based Access Control (RBAC) & Audit Integrity
@@ -223,20 +469,41 @@ export default function AdminUsersPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 flex-wrap">
           <div className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-teal-600" />
             <span>Total Accounts:</span>
             <strong className="text-navy-950 font-bold">{totalCount}</strong>
           </div>
+
           <button
             onClick={() => fetchUsers(currentPage)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
+            className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
             title="Refresh Directory"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             <span>Refresh</span>
           </button>
+
+          {isSystemAdmin ? (
+            <button
+              onClick={handleOpenAddUser}
+              className="flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition shadow-sm"
+              title="Add New User Account"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Add User</span>
+            </button>
+          ) : (
+            <button
+              disabled
+              className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 text-slate-400 rounded-xl text-xs font-semibold cursor-not-allowed opacity-60"
+              title="Only System Administrators can provision accounts"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Add User</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -446,26 +713,39 @@ export default function AdminUsersPage() {
                       {/* Actions */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          {/* View Details */}
                           <button
                             onClick={() => setSelectedUser(u)}
                             className="p-1.5 text-slate-500 hover:text-navy-950 hover:bg-slate-100 rounded-lg transition"
-                            title="View Administrative Details"
+                            title="View Administrative Profile"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
 
+                          {/* Edit Details */}
+                          {isSystemAdmin && (
+                            <button
+                              onClick={() => handleOpenEditModal(u)}
+                              className="p-1.5 text-slate-500 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition"
+                              title="Edit Permitted Details"
+                            >
+                              <UserCog className="w-3.5 h-3.5 text-teal-600" />
+                            </button>
+                          )}
+
+                          {/* Change Role */}
                           {isSystemAdmin ? (
                             <button
                               onClick={() => handleOpenRoleModal(u)}
                               disabled={isSelf}
-                              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${
+                              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold border transition ${
                                 isSelf
                                   ? "opacity-40 cursor-not-allowed bg-slate-50 text-slate-400 border-slate-200"
                                   : "bg-white hover:bg-rose-50 text-slate-700 hover:text-rose-700 border-slate-200 hover:border-rose-200 shadow-sm"
                               }`}
                               title={isSelf ? "Self-role modification disabled for safety" : "Change User Role"}
                             >
-                              <Edit2 className="w-3 h-3 text-rose-600" />
+                              <ShieldAlert className="w-3 h-3 text-rose-600" />
                               <span>Role</span>
                             </button>
                           ) : (
@@ -475,6 +755,18 @@ export default function AdminUsersPage() {
                             >
                               View Only
                             </span>
+                          )}
+
+                          {/* Reset Password */}
+                          {isSystemAdmin && (
+                            <button
+                              onClick={() => handleOpenResetModal(u)}
+                              className="flex items-center gap-1 px-2 py-1 bg-white hover:bg-amber-50 text-slate-700 hover:text-amber-800 rounded-lg text-xs font-semibold border border-slate-200 hover:border-amber-200 shadow-sm transition"
+                              title="Initiate Secure Password Reset"
+                            >
+                              <KeyRound className="w-3 h-3 text-amber-600" />
+                              <span>Reset</span>
+                            </button>
                           )}
                         </div>
                       </td>
@@ -518,7 +810,504 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* User Details Modal */}
+      {/* ============================================================== */}
+      {/* 1. ADD USER MODAL */}
+      {/* ============================================================== */}
+      {addUserModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-50 text-rose-700 rounded-xl border border-rose-200">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-navy-950">Add User Account</h3>
+                  <p className="text-xs text-slate-400">
+                    Register a new citizen, plant operator, or municipal staff account
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setAddUserModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 text-lg transition"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateUserSubmit} className="space-y-4 text-xs">
+              {/* Core Identity */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Ramesh Kumar"
+                    value={newUserData.full_name}
+                    onChange={(e) => setNewUserData({ ...newUserData, full_name: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Email Address *</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="e.g. ramesh.swm@chennaiswm.gov.in"
+                    value={newUserData.email}
+                    onChange={(e) => setNewUserData({ ...newUserData, email: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Username (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="Leave blank to auto-derive from email"
+                    value={newUserData.username}
+                    onChange={(e) => setNewUserData({ ...newUserData, username: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Account Role *</label>
+                  <select
+                    value={newUserData.role}
+                    onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-semibold focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  >
+                    <option value="contributor">Citizen Contributor (contributor)</option>
+                    <option value="public">Public Citizen (public)</option>
+                    <option value="waste_processing_plant_operator">Processing Plant Operator (waste_processing_plant_operator)</option>
+                    <option value="municipal_officer">Municipal SWM Officer (municipal_officer)</option>
+                    <option value="ai_admin">AI Administrator & ML Lead (ai_admin)</option>
+                    <option value="system_admin">System Security Administrator (system_admin)</option>
+                    {rolesCatalog
+                      .filter(
+                        (r) =>
+                          ![
+                            "system_admin",
+                            "ai_admin",
+                            "municipal_officer",
+                            "waste_processing_plant_operator",
+                            "contributor",
+                            "public",
+                          ].includes(r.role)
+                      )
+                      .map((r) => (
+                        <option key={r.role} value={r.role}>
+                          {r.title} ({r.role})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Organization and Ward */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1 sm:col-span-2">
+                  <label className="font-bold text-slate-700">Organization / Department</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. GCC Zone 8 Anna Nagar / Perungudi Plant"
+                    value={newUserData.organization}
+                    onChange={(e) => setNewUserData({ ...newUserData, organization: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Assigned Ward (1-200)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200"
+                    placeholder="e.g. 102"
+                    value={newUserData.assigned_ward}
+                    onChange={(e) => setNewUserData({ ...newUserData, assigned_ward: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+              </div>
+
+              {/* Contact & Status */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">City</label>
+                  <input
+                    type="text"
+                    value={newUserData.city}
+                    onChange={(e) => setNewUserData({ ...newUserData, city: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Phone Number</label>
+                  <input
+                    type="text"
+                    placeholder="+91 98400 12345"
+                    value={newUserData.phone_number}
+                    onChange={(e) => setNewUserData({ ...newUserData, phone_number: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Account Status</label>
+                  <select
+                    value={newUserData.is_active ? "active" : "inactive"}
+                    onChange={(e) => setNewUserData({ ...newUserData, is_active: e.target.value === "active" })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-semibold"
+                  >
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Staff-specific fields */}
+              {isMunicipalStaffRole(newUserData.role) && (
+                <div className="p-3.5 bg-teal-50/70 border border-teal-200 rounded-xl space-y-3">
+                  <div className="flex items-center gap-1.5 text-teal-900 font-bold">
+                    <UserCheck className="w-4 h-4 text-teal-700" />
+                    <span>Municipal Staff Details (Database B Record)</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-teal-800">Employee ID</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. GCC-EMP-045"
+                        value={newUserData.employee_id}
+                        onChange={(e) => setNewUserData({ ...newUserData, employee_id: e.target.value })}
+                        className="w-full px-2.5 py-1.5 bg-white border border-teal-200 rounded-lg text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-teal-800">Department</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Solid Waste Management"
+                        value={newUserData.department}
+                        onChange={(e) => setNewUserData({ ...newUserData, department: e.target.value })}
+                        className="w-full px-2.5 py-1.5 bg-white border border-teal-200 rounded-lg text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-teal-800">Job Title</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Senior Plant Supervisor"
+                        value={newUserData.job_title}
+                        onChange={(e) => setNewUserData({ ...newUserData, job_title: e.target.value })}
+                        className="w-full px-2.5 py-1.5 bg-white border border-teal-200 rounded-lg text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Security Policy Reminder */}
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 leading-relaxed text-[11px] flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-700 flex-shrink-0 mt-0.5" />
+                <span>
+                  <strong>Zero Shared Password Policy:</strong> A cryptographically secure, single-use activation invitation token will be generated. The user will establish their own password upon first access.
+                </span>
+              </div>
+
+              {/* Form Buttons */}
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setAddUserModalOpen(false)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingUser}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition shadow-sm"
+                >
+                  {isCreatingUser && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Provision Account</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 2. EDIT USER DETAILS MODAL */}
+      {/* ============================================================== */}
+      {editModalUser && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-teal-50 text-teal-700 rounded-xl border border-teal-200">
+                  <UserCog className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-navy-950">Edit User Details</h3>
+                  <p className="text-xs text-slate-400">Account: {editModalUser.username} ({editModalUser.email})</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditModalUser(null)}
+                className="text-slate-400 hover:text-slate-700 text-lg transition"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveUserDetails} className="space-y-3.5 text-xs">
+              <div className="space-y-1">
+                <label className="font-bold text-slate-700">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={editFormData.full_name}
+                  onChange={(e) => setEditFormData({ ...editFormData, full_name: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Organization</label>
+                  <input
+                    type="text"
+                    value={editFormData.organization}
+                    onChange={(e) => setEditFormData({ ...editFormData, organization: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">City</label>
+                  <input
+                    type="text"
+                    value={editFormData.city}
+                    onChange={(e) => setEditFormData({ ...editFormData, city: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Phone Number</label>
+                  <input
+                    type="text"
+                    value={editFormData.phone_number}
+                    onChange={(e) => setEditFormData({ ...editFormData, phone_number: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Assigned Ward (1-200)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200"
+                    value={editFormData.assigned_ward}
+                    onChange={(e) => setEditFormData({ ...editFormData, assigned_ward: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="font-bold text-slate-700">Account Status</label>
+                <select
+                  value={editFormData.is_active ? "active" : "inactive"}
+                  onChange={(e) => setEditFormData({ ...editFormData, is_active: e.target.value === "active" })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-semibold"
+                >
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive (Deactivated)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditModalUser(null)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdatingDetails}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition shadow-sm"
+                >
+                  {isUpdatingDetails && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save Details</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 3. RESET PASSWORD CONFIRMATION MODAL */}
+      {/* ============================================================== */}
+      {resetModalUser && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-50 text-amber-700 rounded-xl border border-amber-200">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-navy-950">Reset User Password</h3>
+                  <p className="text-xs text-slate-400">Target Account #{resetModalUser.id}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setResetModalUser(null)}
+                className="text-slate-400 hover:text-slate-700 text-lg transition"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-1.5">
+                <div className="font-bold text-navy-950 text-sm">{resetModalUser.full_name}</div>
+                <div className="font-mono text-slate-500">{resetModalUser.email}</div>
+                <div className="text-[11px] text-slate-400">Current Role: {resetModalUser.role}</div>
+              </div>
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 leading-relaxed text-[11px] space-y-1">
+                <p className="font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 flex-shrink-0" />
+                  Security Notice
+                </p>
+                <p>
+                  Initiating a reset will immediately invalidate any previous reset tokens. A fresh single-use, time-limited token will be issued. Existing passwords are never retrieved or stored in plaintext.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setResetModalUser(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPasswordReset}
+                disabled={isResettingPassword}
+                className="flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition shadow-sm"
+              >
+                {isResettingPassword && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>Confirm & Issue Reset Token</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 4. TOKEN PRESENTATION MODAL (Activation or Reset Link) */}
+      {/* ============================================================== */}
+      {tokenResultModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-50 text-emerald-700 rounded-xl border border-emerald-200">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-navy-950">{tokenResultModal.title}</h3>
+                  <p className="text-xs text-slate-400">{tokenResultModal.targetEmail}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setTokenResultModal(null)}
+                className="text-slate-400 hover:text-slate-700 text-lg transition"
+              >
+                &times;
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              {tokenResultModal.subtitle}
+            </p>
+
+            {/* Email Provider Status Banner */}
+            {tokenResultModal.emailDeliveryStatus === "not_configured" ? (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 leading-relaxed space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Email Provider Status: Missing Configuration</span>
+                </div>
+                <p>
+                  No external SMTP provider is configured in environment variables (<code className="font-mono text-amber-800">SMTP_HOST</code>, <code className="font-mono text-amber-800">SMTP_USER</code>).
+                  Please copy and securely provide the single-use setup link below to the account owner.
+                </p>
+              </div>
+            ) : tokenResultModal.emailDeliveryStatus === "delivered" ? (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 leading-relaxed flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                <span>Invitation email successfully dispatched to <strong>{tokenResultModal.targetEmail}</strong>.</span>
+              </div>
+            ) : (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-[11px] text-rose-900 leading-relaxed flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                <span>Email dispatch failed. Please provide the setup link below directly to the user.</span>
+              </div>
+            )}
+
+            {/* Secure Setup Link Display */}
+            <div className="space-y-1.5 text-xs">
+              <label className="font-bold text-slate-700">Single-Use Setup Link (Expires in 2-24 hours)</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={tokenResultModal.url}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono text-[11px] text-slate-800 select-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(tokenResultModal.url)}
+                  className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shrink-0 shadow-sm"
+                >
+                  {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedLink ? "Copied!" : "Copy"}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setTokenResultModal(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 5. USER DETAILS MODAL */}
+      {/* ============================================================== */}
       {selectedUser && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-5 animate-in fade-in zoom-in-95">
@@ -565,6 +1354,18 @@ export default function AdminUsersPage() {
                   <Building className="w-3.5 h-3.5 text-slate-400" />
                   {selectedUser.organization || "Public Citizen"} ({selectedUser.city || "Chennai"})
                 </p>
+                {selectedUser.phone_number && (
+                  <p className="font-medium text-slate-800 flex items-center gap-1.5">
+                    <Phone className="w-3.5 h-3.5 text-slate-400" />
+                    {selectedUser.phone_number}
+                  </p>
+                )}
+                {selectedUser.assigned_ward && (
+                  <p className="font-medium text-slate-800 flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                    Assigned Ward: {selectedUser.assigned_ward}
+                  </p>
+                )}
               </div>
 
               {/* Staff Profile Details (Database B link) */}
@@ -595,7 +1396,38 @@ export default function AdminUsersPage() {
               </div>
             </div>
 
-            <div className="flex justify-end pt-2">
+            {/* Modal Action Controls */}
+            <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-2">
+                {isSystemAdmin && (
+                  <>
+                    <button
+                      onClick={() => {
+                        const target = selectedUser;
+                        setSelectedUser(null);
+                        handleOpenEditModal(target);
+                      }}
+                      className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold rounded-xl text-xs transition flex items-center gap-1"
+                    >
+                      <UserCog className="w-3.5 h-3.5" />
+                      <span>Edit Details</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        const target = selectedUser;
+                        setSelectedUser(null);
+                        handleOpenResetModal(target);
+                      }}
+                      className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold rounded-xl text-xs transition flex items-center gap-1"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Reset Password</span>
+                    </button>
+                  </>
+                )}
+              </div>
+
               <button
                 onClick={() => setSelectedUser(null)}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
@@ -607,7 +1439,9 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {/* Role Assignment Dialog Modal */}
+      {/* ============================================================== */}
+      {/* 6. ROLE ASSIGNMENT DIALOG MODAL */}
+      {/* ============================================================== */}
       {roleModalUser && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-5 animate-in fade-in zoom-in-95">

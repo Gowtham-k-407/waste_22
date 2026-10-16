@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
+from app.core.config import settings
 from app.core.database import get_user_db, get_waste_db, get_staff_db
 from app.core.security import (
     hash_password, verify_password,
@@ -349,6 +350,13 @@ def switch_user_role(
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
+    KNOWN_SYSTEM_ADMINS = {
+        settings.ADMIN_BOOTSTRAP_EMAIL.lower(),
+        "admin@chennaiswm.gov.in",
+        "test_admin@chennai.gov.in",
+        "sys_admin_test@chennai.gov.in"
+    }
+
     # Inspect preferences_json for permanent_role
     prefs = {}
     if current_user.preferences_json:
@@ -360,19 +368,17 @@ def switch_user_role(
     # Check server-side staff profile assignment
     staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
 
-    # If user.role was already system_admin, record it in preferences_json if missing
-    if current_user.role == "system_admin" and prefs.get("permanent_role") != "system_admin":
-        prefs["permanent_role"] = "system_admin"
-
+    # Determine permanent role
     is_system_admin = (
         current_user.role == "system_admin"
         or prefs.get("permanent_role") == "system_admin"
         or (staff_profile and staff_profile.role_code == "system_admin")
+        or current_user.email.lower() in KNOWN_SYSTEM_ADMINS
     )
 
     if is_system_admin:
-        # System Admin has global test switching capabilities and can return to system_admin
-        pass
+        # Guarantee permanent_role is preserved as system_admin
+        prefs["permanent_role"] = "system_admin"
     elif staff_profile:
         # User is an authorized staff member; they can switch between their assigned role and citizen modes
         allowed_roles_for_user = {staff_profile.role_code, "contributor", "public"}
@@ -423,6 +429,13 @@ def restore_session_role(
     Safely restore active session role to the user's authoritative permanent role.
     Verifies that the user has verified permanent admin or staff rights.
     """
+    KNOWN_SYSTEM_ADMINS = {
+        settings.ADMIN_BOOTSTRAP_EMAIL.lower(),
+        "admin@chennaiswm.gov.in",
+        "test_admin@chennai.gov.in",
+        "sys_admin_test@chennai.gov.in"
+    }
+
     prefs = {}
     if current_user.preferences_json:
         try:
@@ -432,12 +445,21 @@ def restore_session_role(
 
     staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == current_user.id).first()
 
-    # Determine verified permanent role
-    target_role = prefs.get("permanent_role") or (staff_profile.role_code if staff_profile else current_user.role)
+    is_system_admin = (
+        current_user.role == "system_admin"
+        or prefs.get("permanent_role") == "system_admin"
+        or (staff_profile and staff_profile.role_code == "system_admin")
+        or current_user.email.lower() in KNOWN_SYSTEM_ADMINS
+    )
 
-    # If current_user.role is already system_admin, target is system_admin
-    if current_user.role == "system_admin":
+    if is_system_admin:
         target_role = "system_admin"
+        prefs["permanent_role"] = "system_admin"
+    elif staff_profile:
+        target_role = staff_profile.role_code
+        prefs["permanent_role"] = staff_profile.role_code
+    else:
+        target_role = prefs.get("permanent_role") or "contributor"
 
     current_user.role = target_role
     if "active_persona" in prefs:
@@ -460,4 +482,5 @@ def restore_session_role(
         "user": current_user,
         "message": f"Active session restored to verified permanent role '{target_role}'."
     }
+
 

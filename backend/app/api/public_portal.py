@@ -122,6 +122,7 @@ def get_public_resident_dashboard(
 
 # 1. Assigned Truck Public Telemetry (Scoped to user verified area)
 @router.get("/assigned-truck")
+@router.get("/assigned-truck/location")
 def get_public_assigned_truck(
     db: Session = Depends(get_waste_db),
     current_user: User = Depends(get_current_user_from_token)
@@ -138,11 +139,35 @@ def get_public_assigned_truck(
             "status": "unavailable",
             "data_mode": "unavailable",
             "assigned_ward_id": verified_ward,
+            "assigned_ward_number": verified_ward,
+            "latitude": None,
+            "longitude": None,
+            "last_ping": None,
             "message": f"No collection truck currently assigned to Ward {verified_ward}."
         }
+
+    # Validate coordinate bounds
+    if v.latitude is None or v.longitude is None or not (-90.0 <= v.latitude <= 90.0 and -180.0 <= v.longitude <= 180.0):
+        return {
+            "assigned": True,
+            "vehicle_code": v.vehicle_code,
+            "vehicle_type": v.vehicle_type,
+            "status": "unavailable",
+            "data_mode": "unavailable",
+            "assigned_ward_id": verified_ward,
+            "assigned_ward_number": verified_ward,
+            "latitude": None,
+            "longitude": None,
+            "last_ping": v.last_ping.isoformat() if v.last_ping else None,
+            "message": "Assigned truck telemetry coordinates are currently unavailable."
+        }
+
     now = datetime.utcnow()
     last_ping_dt = v.last_ping or now
-    is_stale = (now - last_ping_dt).total_seconds() > 900
+    elapsed_seconds = (now - last_ping_dt).total_seconds()
+    is_stale = elapsed_seconds > 900
+    data_mode = "stale" if is_stale else "simulated"
+
     return {
         "assigned": True,
         "vehicle_code": v.vehicle_code,
@@ -153,9 +178,12 @@ def get_public_assigned_truck(
         "longitude": v.longitude,
         "last_ping": v.last_ping.isoformat() if v.last_ping else None,
         "assigned_ward_id": v.assigned_ward_id,
-        "data_mode": "stale" if is_stale else "simulated",
-        "is_stale": is_stale
+        "assigned_ward_number": v.assigned_ward_id,
+        "data_mode": data_mode,
+        "is_stale": is_stale,
+        "message": f"Collection truck active in Ward {verified_ward}." if not is_stale else "Last known GPS reading received >15 minutes ago."
     }
+
 
 # 2. AI Waste Identification & Segregation Guide
 @router.get("/segregation-guide")

@@ -121,7 +121,8 @@ def seed_database_a(user_db: Session):
             email_verified=True,
             must_change_password=True, # Requires password change on initial login
             contribution_points=5000,
-            badges="System Architect, Super Admin"
+            badges="System Architect, Super Admin",
+            preferences_json=json.dumps({"permanent_role": "system_admin"})
         )
         user_db.add(b_admin)
         user_db.commit()
@@ -146,6 +147,7 @@ def seed_database_a(user_db: Session):
                         city=u_city or "Chennai",
                         contribution_points=u_pts or 50,
                         badges=u_bdg or "Eco Citizen",
+                        preferences_json=json.dumps({"permanent_role": u_role}) if u_role == "system_admin" else None,
                         is_active=True,
                         email_verified=True
                     ))
@@ -156,7 +158,8 @@ def seed_database_a(user_db: Session):
 
     # 3. Add representative staff users and public contributors
     initial_users = [
-        User(username="admin", email="admin@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS (Municipal Commissioner)", role="system_admin", organization="Greater Chennai Corporation (GCC)", city="Chennai", contribution_points=1250, badges="Municipal Director"),
+        User(username="admin", email="admin@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS (Municipal Commissioner)", role="system_admin", organization="Greater Chennai Corporation (GCC)", city="Chennai", contribution_points=1250, badges="Municipal Director", preferences_json=json.dumps({"permanent_role": "system_admin"})),
+
         User(username="commissioner", email="commissioner@chennaiswm.gov.in", hashed_password=hash_password("Admin@123"), full_name="Dr. M. Soundararajan, IAS", role="municipal_commissioner", organization="Greater Chennai Corporation", city="Chennai", contribution_points=1200, badges="Municipal Commissioner"),
         User(username="kumar_officer", email="kumar.swm@chennaiswm.gov.in", hashed_password=hash_password("Officer@123"), full_name="Er. R. Kumar", role="sanitary_officer", organization="GCC Zone 8 - Anna Nagar", city="Chennai", contribution_points=850, badges="Senior Sanitary Officer"),
         User(username="perungudi_operator", email="operator.perungudi@chennaiswm.gov.in", hashed_password=hash_password("Operator@123"), full_name="K. Vaitheeswaran", role="waste_processing_plant_operator", organization="Perungudi SWM Processing Plant", city="Chennai", contribution_points=600, badges="Plant Operator"),

@@ -31,6 +31,7 @@ class PublicTruckResponse(BaseModel):
     message: Optional[str] = None
 
 @router.get("/assigned-truck", response_model=PublicTruckResponse)
+@router.get("/assigned-truck/location", response_model=PublicTruckResponse)
 def get_my_assigned_truck(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_from_token)
@@ -49,7 +50,26 @@ def get_my_assigned_truck(
             data_mode="unavailable",
             assigned_ward_id=verified_ward,
             assigned_ward_number=verified_ward,
+            latitude=None,
+            longitude=None,
+            last_ping=None,
             message=f"No collection truck is currently assigned or active in Ward {verified_ward}."
+        )
+
+    # Validate coordinate bounds
+    if v.latitude is None or v.longitude is None or not (-90.0 <= v.latitude <= 90.0 and -180.0 <= v.longitude <= 180.0):
+        return PublicTruckResponse(
+            assigned=True,
+            vehicle_code=v.vehicle_code,
+            vehicle_type=v.vehicle_type,
+            status="unavailable",
+            data_mode="unavailable",
+            assigned_ward_id=verified_ward,
+            assigned_ward_number=verified_ward,
+            latitude=None,
+            longitude=None,
+            last_ping=v.last_ping,
+            message="No valid GPS coordinates available for assigned truck."
         )
 
     # Check staleness (if last_ping > 15 minutes)
@@ -72,8 +92,9 @@ def get_my_assigned_truck(
         assigned_ward_number=v.assigned_ward_id,
         data_mode=data_mode,
         is_stale=is_stale,
-        message=f"Collection truck active in Ward {verified_ward}."
+        message=f"Collection truck active in Ward {verified_ward}." if not is_stale else "Last known GPS reading received >15 minutes ago."
     )
+
 
 @router.get("/", response_model=List[VehicleSchema])
 def get_all_vehicles(

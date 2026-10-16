@@ -118,3 +118,42 @@ class RoleDefinitionResponse(BaseModel):
     description: Optional[str] = None
     is_staff: bool = False
     is_admin: bool = False
+
+class UserAdminCreateRequest(BaseModel):
+    full_name: str
+    email: str
+    username: Optional[str] = None
+    role: str = "contributor"
+    organization: Optional[str] = None
+    city: Optional[str] = "Chennai"
+    phone_number: Optional[str] = None
+    assigned_ward: Optional[int] = None
+    is_active: bool = True
+    employee_id: Optional[str] = None
+    department: Optional[str] = None
+    job_title: Optional[str] = None
+
+class UserAdminCreateResponse(BaseModel):
+    success: bool
+    message: str
+    user: UserAdminDetailResponse
+    activation_token: Optional[str] = None
+    activation_url: Optional[str] = None
+    email_delivery_status: str
+
+class UserAdminUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    organization: Optional[str] = None
+    city: Optional[str] = None
+    phone_number: Optional[str] = None
+    assigned_ward: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class AdminPasswordResetResponse(BaseModel):
+    success: bool
+    message: str
+    user_id: int
+    email: str
+    reset_token: Optional[str] = None
+    reset_url: Optional[str] = None
+    email_delivery_status: str

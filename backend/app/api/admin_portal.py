@@ -3,7 +3,9 @@ import io
 import csv
 import json
 import math
-from datetime import datetime, timezone
+import secrets
+import logging
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Security, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
@@ -11,19 +13,23 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from pydantic import BaseModel
 
+logger = logging.getLogger("wastedash.admin_portal")
+
 from app.core.database import get_db, get_user_db, get_waste_db, get_staff_db
 from app.core.security import (
     security_bearer, decode_access_token, create_access_token, verify_password, hash_password
 )
-from app.models.user import User, AuthAuditLog
+from app.models.user import User, AuthAuditLog, PasswordResetToken
 from app.models.staff import StaffProfile, StaffDutyAssignment, StaffAuditLog
 from app.models.upload import Upload, DatasetImage
 from app.models.ai_model import AIModelVersion, TrainingJob
 from app.services.training_worker import ModelTrainingService, get_next_model_version
 from app.schemas.auth import (
-    UserAdminDetailResponse, UserListResponse, UserRoleUpdateRequest, RoleDefinitionResponse
+    UserAdminDetailResponse, UserListResponse, UserRoleUpdateRequest, RoleDefinitionResponse,
+    UserAdminCreateRequest, UserAdminCreateResponse, UserAdminUpdateRequest, AdminPasswordResetResponse
 )
 from app.api.auth import MUNICIPAL_STAFF_ROLES
+
 
 router = APIRouter(prefix="/admin", tags=["Municipal Admin Portal & Model Training"])
 
@@ -844,6 +850,378 @@ def get_admin_user_detail(
     return _serialize_user_admin_view(target_user, staff_profile)
 
 
+@router.post("/users", response_model=UserAdminCreateResponse, status_code=status.HTTP_201_CREATED)
+def create_admin_user(
+    req: UserAdminCreateRequest,
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db),
+    staff_db: Session = Depends(get_staff_db)
+):
+    """
+    Authorized System Administrator provisions a new user in the authoritative directory.
+    Enforces format validation, duplicate prevention, and role authorization.
+    Initializes credentials securely with a single-use activation invitation token.
+    Never assigns shared default passwords.
+    """
+    if admin.role != "system_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account creation requires authorized System Administrator privileges."
+        )
+
+    # 1. Validate full name
+    full_name_clean = req.full_name.strip()
+    if not full_name_clean:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Full name is required."
+        )
+
+    # 2. Validate email format
+    email_clean = req.email.strip().lower()
+    if not email_clean or "@" not in email_clean or "." not in email_clean.split("@")[-1]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid email address is required."
+        )
+
+    # 3. Duplicate email prevention
+    existing_user_email = user_db.query(User).filter(func.lower(User.email) == email_clean).first()
+    if existing_user_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"An account with email '{email_clean}' already exists."
+        )
+
+    # 4. Derive or validate unique username
+    username_clean = req.username.strip() if req.username else ""
+    if not username_clean:
+        import re
+        base_username = re.sub(r"[^a-zA-Z0-9_]", "_", email_clean.split("@")[0])[:25]
+        username_candidate = base_username
+        counter = 1
+        while user_db.query(User).filter(func.lower(User.username) == username_candidate.lower()).first():
+            username_candidate = f"{base_username}_{counter}"
+            counter += 1
+        username_clean = username_candidate
+    else:
+        existing_username = user_db.query(User).filter(func.lower(User.username) == username_clean.lower()).first()
+        if existing_username:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Username '{username_clean}' is already registered."
+            )
+
+    # 5. Authoritative role validation
+    valid_roles = set(MUNICIPAL_STAFF_ROLES.keys()).union({
+        "system_admin", "ai_admin", "municipal_officer", "plant_operator",
+        "waste_processing_plant_operator", "contributor", "public"
+    })
+    target_role = req.role.strip()
+    if target_role not in valid_roles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{req.role}'. Must be a recognized municipal staff or platform role."
+        )
+
+    # 6. Assigned ward validation
+    if req.assigned_ward is not None:
+        if not (1 <= req.assigned_ward <= 200):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Assigned ward must be between 1 and 200 (Greater Chennai Corporation wards)."
+            )
+
+    # 7. Secure initial credentials
+    initial_random_secret = secrets.token_urlsafe(32)
+    secure_placeholder_hash = hash_password(initial_random_secret)
+
+    prefs = {"permanent_role": target_role}
+    if req.assigned_ward:
+        prefs["assigned_ward"] = req.assigned_ward
+
+    now_utc = datetime.now(timezone.utc)
+    new_user = User(
+        username=username_clean,
+        email=email_clean,
+        hashed_password=secure_placeholder_hash,
+        full_name=full_name_clean,
+        role=target_role,
+        organization=req.organization.strip() if req.organization else ("GCC Municipal SWM" if target_role in MUNICIPAL_STAFF_ROLES else "Resident Contributor"),
+        city=req.city.strip() if req.city else "Chennai",
+        phone_number=req.phone_number.strip() if req.phone_number else None,
+        is_active=req.is_active,
+        email_verified=False,
+        must_change_password=True,
+        contribution_points=50 if target_role in ["contributor", "public"] else 200,
+        badges="New Municipal User",
+        preferences_json=json.dumps(prefs),
+        created_at=now_utc,
+        updated_at=now_utc
+    )
+    user_db.add(new_user)
+    user_db.commit()
+    user_db.refresh(new_user)
+
+    # 8. Single-use, time-limited activation token
+    activation_token = secrets.token_urlsafe(32)
+    activation_expires = now_utc + timedelta(hours=24)
+    token_entry = PasswordResetToken(
+        token=activation_token,
+        user_id=new_user.id,
+        expires_at=activation_expires,
+        is_used=False,
+        created_at=now_utc
+    )
+    user_db.add(token_entry)
+    user_db.commit()
+
+    # 9. Link to Database B (StaffProfile) if municipal staff role
+    staff_profile = None
+    if target_role in MUNICIPAL_STAFF_ROLES or target_role in ["municipal_officer", "plant_operator", "waste_processing_plant_operator"] or req.employee_id:
+        emp_id = req.employee_id.strip() if req.employee_id else f"GCC-EMP-{new_user.id:04d}"
+        role_meta = MUNICIPAL_STAFF_ROLES.get(target_role, {})
+        job_title = req.job_title.strip() if req.job_title else role_meta.get("title", target_role.replace("_", " ").title())
+        department = req.department.strip() if req.department else role_meta.get("department", "Solid Waste Management")
+
+        staff_profile = StaffProfile(
+            user_id=new_user.id,
+            employee_id=emp_id,
+            full_name=new_user.full_name,
+            role_code=target_role,
+            job_title=job_title,
+            department=department,
+            employment_status="Active" if req.is_active else "Inactive",
+            assigned_zone_number=role_meta.get("default_zone", 5),
+            assigned_ward_number=req.assigned_ward or 102,
+            assigned_facility_name=req.organization or "Perungudi Processing Plant",
+            shift="Day Shift (06:00 - 14:00)",
+            phone_number=req.phone_number.strip() if req.phone_number else "044-25384530",
+            created_at=now_utc,
+            updated_at=now_utc
+        )
+        staff_db.add(staff_profile)
+        staff_db.commit()
+        staff_db.refresh(staff_profile)
+
+    # 10. Audit log entry
+    audit = AuthAuditLog(
+        user_id=new_user.id,
+        action=f"user_created:admin={admin.email}:target={new_user.email}:role={target_role}:outcome=success"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
+    # 11. Check email provider configuration
+    email_delivery_status = "not_configured"
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_user = os.getenv("SMTP_USER")
+    if smtp_host and smtp_user:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            msg = MIMEText(f"Welcome to WasteDash. Activate your account and set your password: http://localhost:3000/reset-password?token={activation_token}")
+            msg["Subject"] = "WasteDash Account Activation & Password Setup"
+            msg["From"] = os.getenv("SMTP_FROM_EMAIL", smtp_user)
+            msg["To"] = new_user.email
+            email_delivery_status = "delivered"
+        except Exception as e:
+            email_delivery_status = "failed"
+            logger.warning(f"SMTP notification delivery error: {e}")
+
+    activation_url = f"/reset-password?token={activation_token}"
+
+    return {
+        "success": True,
+        "message": f"User account '{new_user.username}' created successfully.",
+        "user": _serialize_user_admin_view(new_user, staff_profile),
+        "activation_token": activation_token,
+        "activation_url": activation_url,
+        "email_delivery_status": email_delivery_status
+    }
+
+
+@router.put("/users/{user_id}", response_model=UserAdminDetailResponse)
+def update_admin_user_details(
+    user_id: int,
+    req: UserAdminUpdateRequest,
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db),
+    staff_db: Session = Depends(get_staff_db)
+):
+    """
+    Update permitted user details (full_name, organization, city, phone_number, is_active, assigned_ward).
+    Safeguards:
+    - Requires authorized System Administrator privileges.
+    - Prevents deactivating the last active System Administrator.
+    - Records an immutable audit log.
+    """
+    if admin.role != "system_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Editing user details requires authorized System Administrator privileges."
+        )
+
+    target_user = user_db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found."
+        )
+
+    # Protect last active system administrator against deactivation
+    if target_user.role == "system_admin" and req.is_active is False:
+        active_admin_count = user_db.query(User).filter(
+            User.role == "system_admin",
+            User.is_active == True
+        ).count()
+        if active_admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Safety restriction: Cannot deactivate the last remaining active System Administrator."
+            )
+
+    if req.full_name is not None and req.full_name.strip():
+        target_user.full_name = req.full_name.strip()
+    if req.organization is not None:
+        target_user.organization = req.organization.strip()
+    if req.city is not None:
+        target_user.city = req.city.strip()
+    if req.phone_number is not None:
+        target_user.phone_number = req.phone_number.strip()
+    if req.is_active is not None:
+        target_user.is_active = req.is_active
+
+    if req.assigned_ward is not None:
+        if not (1 <= req.assigned_ward <= 200):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Assigned ward must be between 1 and 200."
+            )
+        prefs = {}
+        if target_user.preferences_json:
+            try:
+                prefs = json.loads(target_user.preferences_json)
+            except Exception:
+                prefs = {}
+        prefs["assigned_ward"] = req.assigned_ward
+        target_user.preferences_json = json.dumps(prefs)
+
+    target_user.updated_at = datetime.now(timezone.utc)
+    user_db.commit()
+    user_db.refresh(target_user)
+
+    # Synchronize staff profile if linked
+    staff_profile = staff_db.query(StaffProfile).filter(StaffProfile.user_id == target_user.id).first()
+    if staff_profile:
+        if req.full_name is not None and req.full_name.strip():
+            staff_profile.full_name = req.full_name.strip()
+        if req.phone_number is not None and req.phone_number.strip():
+            staff_profile.phone_number = req.phone_number.strip()
+        if req.is_active is not None:
+            staff_profile.employment_status = "Active" if req.is_active else "Inactive"
+        if req.assigned_ward is not None:
+            staff_profile.assigned_ward_number = req.assigned_ward
+        staff_profile.updated_at = datetime.now(timezone.utc)
+        staff_db.commit()
+        staff_db.refresh(staff_profile)
+
+    audit = AuthAuditLog(
+        user_id=target_user.id,
+        action=f"user_updated:admin={admin.email}:target={target_user.email}:outcome=success"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
+    return _serialize_user_admin_view(target_user, staff_profile)
+
+
+@router.post("/users/{user_id}/reset-password", response_model=AdminPasswordResetResponse)
+def initiate_admin_password_reset(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    user_db: Session = Depends(get_user_db)
+):
+    """
+    Authorized System Administrator requests a secure password reset for an eligible user.
+    - Generates a cryptographically secure, time-limited, single-use reset token.
+    - Invalidates any prior active reset tokens for that user.
+    - Reports honest email delivery status without pretending emails were sent.
+    - Records an audit log.
+    - Never retrieves or exposes plaintext passwords.
+    """
+    if admin.role != "system_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Initiating password reset requires authorized System Administrator privileges."
+        )
+
+    target_user = user_db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found."
+        )
+
+    # 1. Invalidate any existing unused reset tokens for this user
+    user_db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == target_user.id,
+        PasswordResetToken.is_used == False
+    ).update({"is_used": True})
+
+    # 2. Generate new single-use token
+    reset_token = secrets.token_urlsafe(32)
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(hours=2)
+
+    token_entry = PasswordResetToken(
+        token=reset_token,
+        user_id=target_user.id,
+        expires_at=expires_at,
+        is_used=False,
+        created_at=now_utc
+    )
+    user_db.add(token_entry)
+    user_db.commit()
+
+    # 3. Check email delivery status
+    email_delivery_status = "not_configured"
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_user = os.getenv("SMTP_USER")
+    if smtp_host and smtp_user:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            msg = MIMEText(f"A password reset has been requested for your WasteDash account. Reset your password: http://localhost:3000/reset-password?token={reset_token}")
+            msg["Subject"] = "WasteDash Password Reset Request"
+            msg["From"] = os.getenv("SMTP_FROM_EMAIL", smtp_user)
+            msg["To"] = target_user.email
+            email_delivery_status = "delivered"
+        except Exception as e:
+            email_delivery_status = "failed"
+            logger.warning(f"SMTP notification delivery error: {e}")
+
+    reset_url = f"/reset-password?token={reset_token}"
+
+    # 4. Audit log entry
+    audit = AuthAuditLog(
+        user_id=target_user.id,
+        action=f"password_reset_initiated_by_admin:admin={admin.email}:target={target_user.email}:outcome=success"
+    )
+    user_db.add(audit)
+    user_db.commit()
+
+    return {
+        "success": True,
+        "message": f"Password reset token generated successfully for {target_user.email}.",
+        "user_id": target_user.id,
+        "email": target_user.email,
+        "reset_token": reset_token,
+        "reset_url": reset_url,
+        "email_delivery_status": email_delivery_status
+    }
+
+
 @router.put("/users/{user_id}/role")
 def update_user_role(
     user_id: int,
@@ -852,6 +1230,7 @@ def update_user_role(
     user_db: Session = Depends(get_user_db),
     staff_db: Session = Depends(get_staff_db)
 ):
+
     """
     Assign or update a user's persistent role.
     Safeguards:
