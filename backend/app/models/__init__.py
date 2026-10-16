@@ -16,7 +16,7 @@ from app.models.upload import Upload, DatasetImage
 from app.models.ai_model import AIModelVersion, TrainingJob
 from app.models.dataset import DatasetSource, DatasetImport
 from app.models.optimization import EnvironmentalMetric, OperationalAlert, OptimizationRecommendation
-from app.models.iot import IoTDevice, DeviceTelemetry
+from app.models.iot import IoTDevice, DeviceTelemetry, IoTSortingRecord
 from app.models.complaint import (
     PublicComplaint, ComplaintFollowUp, Notification,
     WeighbridgeRecord, SimulationRun, AIInferenceAudit
@@ -52,6 +52,7 @@ __all__ = [
     "OptimizationRecommendation",
     "IoTDevice",
     "DeviceTelemetry",
+    "IoTSortingRecord",
     "PublicComplaint",
     "ComplaintFollowUp",
     "Notification",

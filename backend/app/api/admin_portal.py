@@ -274,21 +274,29 @@ def approve_upload(
     upload.admin_notes = req.admin_notes
     upload.verified_at = datetime.utcnow()
 
-    # Add to dataset_images
-    dataset_entry = DatasetImage(
-        upload_id=upload.id,
-        image_url=upload.image_url,
-        stored_image_path=upload.stored_image_path,
-        waste_category=final_cat,
-        object_label=final_lbl,
-        description=upload.description,
-        location_context=upload.location_context,
-        split="train",
-        verified_by=admin.full_name or admin.username,
-        verified_at=datetime.utcnow(),
-        used_in_training=False
-    )
-    db.add(dataset_entry)
+    # Add to dataset_images idempotently
+    existing_entry = db.query(DatasetImage).filter(DatasetImage.upload_id == upload.id).first()
+    if existing_entry:
+        existing_entry.waste_category = final_cat
+        existing_entry.object_label = final_lbl
+        existing_entry.verified_by = admin.full_name or admin.username
+        existing_entry.verified_at = datetime.utcnow()
+        dataset_entry = existing_entry
+    else:
+        dataset_entry = DatasetImage(
+            upload_id=upload.id,
+            image_url=upload.image_url,
+            stored_image_path=upload.stored_image_path,
+            waste_category=final_cat,
+            object_label=final_lbl,
+            description=upload.description,
+            location_context=upload.location_context,
+            split="train",
+            verified_by=admin.full_name or admin.username,
+            verified_at=datetime.utcnow(),
+            used_in_training=False
+        )
+        db.add(dataset_entry)
     db.commit()
 
     return {
@@ -386,20 +394,27 @@ def batch_approve_uploads(
         u.verified_label = u.object_label
         u.verified_at = datetime.utcnow()
 
-        # Add to dataset
-        ds = DatasetImage(
-            upload_id=u.id,
-            image_url=u.image_url,
-            stored_image_path=u.stored_image_path,
-            waste_category=u.category,
-            object_label=u.object_label,
-            description=u.description,
-            location_context=u.location_context,
-            split="train",
-            verified_by=admin.full_name or admin.username,
-            verified_at=datetime.utcnow()
-        )
-        db.add(ds)
+        # Add or update dataset idempotently
+        existing_ds = db.query(DatasetImage).filter(DatasetImage.upload_id == u.id).first()
+        if existing_ds:
+            existing_ds.waste_category = u.category
+            existing_ds.object_label = u.object_label
+            existing_ds.verified_by = admin.full_name or admin.username
+            existing_ds.verified_at = datetime.utcnow()
+        else:
+            ds = DatasetImage(
+                upload_id=u.id,
+                image_url=u.image_url,
+                stored_image_path=u.stored_image_path,
+                waste_category=u.category,
+                object_label=u.object_label,
+                description=u.description,
+                location_context=u.location_context,
+                split="train",
+                verified_by=admin.full_name or admin.username,
+                verified_at=datetime.utcnow()
+            )
+            db.add(ds)
         count += 1
 
     db.commit()
@@ -671,6 +686,12 @@ def activate_model(
     if not target:
         raise HTTPException(status_code=404, detail="Model version not found.")
 
+    if target.status == "candidate_rejected":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot activate candidate model {target.version}: It failed validation evaluation gates."
+        )
+
     from app.services.ai_vision_service import AIVisionService
     from app.core.config import settings
     checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
@@ -728,6 +749,81 @@ def get_active_model(db: Session = Depends(get_db)):
         "accuracy": model.accuracy if model else 0.918,
         "f1_score": model.f1_score if model else 0.905,
         "is_active": True
+    }
+
+
+@router.get("/ai/fallback-status")
+def get_admin_fallback_status(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Authorized AI Admin endpoint: inspect fallback health, usage counts,
+    manual review queue, and error rates.
+    """
+    from app.services.ai_vision_service import AIVisionService
+    from app.models.detection import AIDetection
+    from app.models.upload import Upload
+
+    total_detections = db.query(AIDetection).count()
+    total_uploads = db.query(Upload).count()
+    pending_verification = db.query(Upload).filter(Upload.status == "PENDING_VERIFICATION").count()
+
+    resnet_engine, yolo_engine = AIVisionService.get_engines()
+
+    return {
+        "status": "operational",
+        "fallback_algorithm": "OpenCV Multi-Cue Classical CV Heuristic Engine",
+        "primary_engines": {
+            "resnet50": "ready" if (resnet_engine and resnet_engine.is_loaded) else "offline",
+            "yolo11n": "ready" if (yolo_engine and yolo_engine.is_loaded) else "offline"
+        },
+        "trigger_conditions": [
+            "AI service network exception / HTTP 5xx",
+            "Inference timeout (>15.0s)",
+            "Confidence < threshold (0.45)",
+            "Corrupted image payload / blank frame",
+            "Uncertain or unknown prediction"
+        ],
+        "metrics": {
+            "total_detections_logged": total_detections,
+            "total_user_uploads": total_uploads,
+            "manual_review_queue_size": pending_verification,
+            "active_version": AIVisionService._active_version
+        },
+        "safety_rule": "Fallback and low-confidence predictions (<0.70) are strictly barred from triggering automated physical IoT actuators."
+    }
+
+
+@router.get("/models/by-task")
+def get_models_by_task(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns active models segmented by task:
+    - image_classification -> ResNet50
+    - object_detection -> YOLO11n
+    """
+    return {
+        "tasks": {
+            "image_classification": {
+                "active_model": "ResNet50-WasteClassifier",
+                "framework": "PyTorch 2.2 / ResNet50",
+                "checkpoint": "waste_resnet50.pth",
+                "task": "image_classification",
+                "compatible_tasks": ["image_classification", "still_upload_audit"],
+                "status": "production"
+            },
+            "object_detection": {
+                "active_model": "YOLO11n-WasteDetector",
+                "framework": "Ultralytics YOLO11",
+                "checkpoint": "yolo11n.pt",
+                "task": "object_detection",
+                "compatible_tasks": ["object_detection", "camera_frame_detection", "truck_scanner"],
+                "status": "production"
+            }
+        }
     }
 
 

@@ -78,8 +78,8 @@ async def upload_and_predict(
     with open(saved_path, "wb") as f:
         f.write(content)
 
-    # AI prediction via Multi-Stage Pipeline
-    prediction = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename)
+    # AI prediction via Multi-Stage Pipeline (Image Upload -> ResNet50)
+    prediction = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename, task="classification")
 
     # Return prediction for user confirmation with Level 1 & Level 2 taxonomy
     return {

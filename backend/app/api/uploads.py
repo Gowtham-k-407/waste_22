@@ -123,7 +123,7 @@ async def upload_user_waste_image(
 
     # 4. Automated AI Pre-Classification
     try:
-        ai_result = AIVisionService.detect_and_classify(pil_img, filename_hint=filename)
+        ai_result = AIVisionService.detect_and_classify(pil_img, filename_hint=filename, task="classification")
         ai_cat = ai_result.get("predicted_category", actual_category)
         ai_lbl = ai_result.get("detected_item", actual_label)
         ai_conf = ai_result.get("confidence", 0.85)

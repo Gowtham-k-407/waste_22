@@ -71,9 +71,12 @@ class Settings(BaseModel):
     STORAGE_SECRET_KEY: str = os.getenv("STORAGE_SECRET_KEY", "")
     STORAGE_REGION: str = os.getenv("STORAGE_REGION", "ap-south-1") # Chennai / Mumbai region
 
-    # AI Inference Microservice (Optional Decoupled Service)
-    AI_INFERENCE_URL: str = os.getenv("AI_INFERENCE_URL", "")
-    AI_INFERENCE_API_KEY: str = os.getenv("AI_INFERENCE_API_KEY", "")
+    # Standalone AI Microservice Configuration (Independently Deployed)
+    AI_SERVICE_BASE_URL: str = os.getenv("AI_SERVICE_BASE_URL", os.getenv("AI_INFERENCE_URL", "http://localhost:8001"))
+    AI_SERVICE_API_KEY: str = os.getenv("AI_SERVICE_API_KEY", os.getenv("AI_INFERENCE_API_KEY", ""))
+    AI_INFERENCE_URL: str = os.getenv("AI_INFERENCE_URL", os.getenv("AI_SERVICE_BASE_URL", "http://localhost:8001"))
+    AI_INFERENCE_API_KEY: str = os.getenv("AI_INFERENCE_API_KEY", os.getenv("AI_SERVICE_API_KEY", ""))
+
 
     # AI Fallback & Classification Configuration
     FALLBACK_CLASSIFICATION_ENABLED: bool = os.getenv("FALLBACK_CLASSIFICATION_ENABLED", "true").lower() in ("true", "1", "yes")

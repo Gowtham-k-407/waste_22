@@ -76,8 +76,8 @@ async def live_webcam_detect(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image frame format.")
 
-    # 1. Global AI Multi-stage Detection
-    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename or "")
+    # 1. Global AI Multi-stage Detection (Live Camera Frame -> YOLO11n)
+    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename or "", task="detection")
     current_embedding = analysis["embedding"]
 
     # 2. Check for Authenticated User & Personal AI Memory Search
@@ -179,10 +179,11 @@ async def simulate_truck_scan(
     else:
         pil_img = Image.new('RGB', (320, 240), color=(73, 109, 137))
 
-    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=filename)
+    import uuid
+    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=filename, task="detection")
 
     det = AIDetection(
-        detection_code=f"DET-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        detection_code=f"DET-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
         vehicle_code=vehicle_code,
         ward_number=ward_number,
         location_name=location_name,
@@ -192,8 +193,8 @@ async def simulate_truck_scan(
         confidence=analysis["confidence"],
         bounding_box_json=json.dumps(analysis["bounding_box"]),
         image_url="/assets/samples/waste_sample.jpg",
-        model_version="v2.2-ewaste",
-        estimated_weight_kg=analysis["estimated_weight_kg"],
+        model_version=analysis.get("model_version", "v2.1"),
+        estimated_weight_kg=analysis.get("estimated_weight_kg", 1.2),
         bin_fill_level_pct=72.0,
         timestamp=datetime.utcnow(),
         data_type="AI-DETECTED DATA"

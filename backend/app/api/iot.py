@@ -3,12 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
 from datetime import datetime
 
+from pydantic import BaseModel, Field
 from app.core.database import get_db, get_user_db
 from app.core.rbac import require_roles
 from app.models.user import User, AuthAuditLog
-from app.models.iot import IoTDevice, DeviceTelemetry
+from app.models.iot import IoTDevice, DeviceTelemetry, IoTSortingRecord
 from app.services.mqtt_service import process_telemetry_payload, get_connection_status
 from app.services.iot_simulator import IoTSimulatorService
+from app.services.iot_sorting_service import IoTSortingSafetyService
 
 router = APIRouter(prefix="/iot", tags=["IoT & Fleet Telemetry"])
 
@@ -164,3 +166,120 @@ def get_simulator_status():
         "running": IoTSimulatorService.is_running(),
         "mode": "SIMULATED DATA" if IoTSimulatorService.is_running() else "STANDBY"
     }
+
+
+# -------------------------------------------------------------
+# IoT PHYSICAL SORTING CONVEYOR & SAFETY CONTROLS
+# -------------------------------------------------------------
+class SortingCommandRequest(BaseModel):
+    item_label: Optional[str] = "Detected Item"
+    detected_category: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    is_fallback: Optional[bool] = False
+    prediction_id: Optional[str] = None
+    event_id: Optional[str] = None
+
+class EmergencyStopRequest(BaseModel):
+    active: bool
+
+@router.post("/sorting/command")
+def execute_sorting_command(
+    cmd: SortingCommandRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Submits a waste detection to the physical sorting layer.
+    Enforces safety rules:
+      - Emergency Stop halts all mechanical action.
+      - Fallback & low confidence (<0.70) predictions are safely diverted to Bin 4 (Manual Review Chute).
+      - Category-to-bin destination mapping.
+      - Optical break-beam sensor confirmation loop.
+    """
+    record = IoTSortingSafetyService.evaluate_and_dispatch(
+        db=db,
+        item_label=cmd.item_label,
+        detected_category=cmd.detected_category,
+        confidence=cmd.confidence,
+        is_fallback=cmd.is_fallback or False,
+        prediction_id=cmd.prediction_id,
+        event_id=cmd.event_id
+    )
+    return {
+        "event_id": record.event_id,
+        "prediction_id": record.prediction_id,
+        "item_label": record.item_label,
+        "detected_category": record.detected_category,
+        "confidence": record.confidence,
+        "is_fallback": record.is_fallback,
+        "target_bin": record.target_bin,
+        "bin_index": record.bin_index,
+        "status": record.status,
+        "rejection_reason": record.rejection_reason,
+        "actuator_id": record.actuator_id,
+        "actuator_latency_ms": record.actuator_latency_ms,
+        "verified_destination": record.verified_destination,
+        "sensor_verification_status": record.sensor_verification_status,
+        "timestamp": record.created_at.isoformat()
+    }
+
+@router.get("/sorting/records")
+def list_sorting_records(
+    limit: int = Query(50, le=500),
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Returns recent physical sorting execution audit records."""
+    query = db.query(IoTSortingRecord)
+    if status:
+        query = query.filter(IoTSortingRecord.status == status)
+    records = query.order_by(IoTSortingRecord.created_at.desc()).limit(limit).all()
+    return {
+        "count": len(records),
+        "records": [
+            {
+                "id": r.id,
+                "event_id": r.event_id,
+                "prediction_id": r.prediction_id,
+                "item_label": r.item_label,
+                "detected_category": r.detected_category,
+                "confidence": r.confidence,
+                "is_fallback": r.is_fallback,
+                "target_bin": r.target_bin,
+                "bin_index": r.bin_index,
+                "status": r.status,
+                "rejection_reason": r.rejection_reason,
+                "actuator_id": r.actuator_id,
+                "actuator_latency_ms": r.actuator_latency_ms,
+                "sensor_verification_status": r.sensor_verification_status,
+                "created_at": r.created_at.isoformat()
+            }
+            for r in records
+        ]
+    }
+
+@router.post("/sorting/emergency-stop")
+def toggle_emergency_stop(
+    req: EmergencyStopRequest,
+    current_user: User = Depends(require_roles(ADMIN_IOT_ROLES)),
+    user_db: Session = Depends(get_user_db)
+):
+    """
+    Emergency Stop override for automated sorting line.
+    Immediately halts diverters and diverts conveyor belt flow to reject chute.
+    """
+    is_active = IoTSortingSafetyService.set_emergency_stop(req.active)
+    action_str = "iot_sorting_emergency_stop_activated" if req.active else "iot_sorting_emergency_stop_cleared"
+    audit = AuthAuditLog(user_id=current_user.id, action=action_str)
+    user_db.add(audit)
+    user_db.commit()
+    return {
+        "emergency_stop_active": is_active,
+        "status": "STOPPED" if is_active else "OPERATIONAL",
+        "message": "Emergency Stop engaged! Automated actuators locked." if is_active else "Emergency Stop cleared. Resuming normal sorting."
+    }
+
+@router.get("/sorting/safety-status")
+def get_sorting_safety_status(db: Session = Depends(get_db)):
+    """Returns real-time status of sorting line safety, actuators, and reject rate statistics."""
+    return IoTSortingSafetyService.get_system_status(db)
+

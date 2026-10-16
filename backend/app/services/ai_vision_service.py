@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import json
 import hashlib
@@ -8,6 +9,7 @@ from typing import Dict, Any, Tuple, List, Optional
 from PIL import Image, ImageStat
 import numpy as np
 import torch
+import torchvision.models as models
 import torchvision.transforms as transforms
 
 from app.core.config import settings
@@ -86,17 +88,62 @@ CATEGORY_COLORS = {
     "Plastic": "#3B82F6",       # Blue
     "Metal": "#64748B",         # Slate
     "Organic Waste": "#10B981", # Emerald
-    "Food Waste": "#84CC16",    # Lime
+    "Food Waste": "#059669",    # Dark Emerald
     "Glass": "#F59E0B",         # Amber
     "Paper": "#EAB308",         # Yellow
     "Cardboard": "#D97706",     # Ochre
     "Hazardous Waste": "#EF4444",# Rose
     "Textile Waste": "#EC4899", # Pink
     "Mixed Waste": "#64748B",   # Gray
+    "unknown": "#94A3B8"
 }
 
-# External Dataset Class Mapping to GCC Categories
+# External COCO / Dataset Class Mapping to GCC Categories
 EXTERNAL_CLASS_MAPPING = {
+    "bottle": ("Plastic", "Plastic Bottle (PET)"),
+    "wine glass": ("Glass", "Glass Bottle / Jar"),
+    "cup": ("Glass", "Glass Beverage Cup"),
+    "bowl": ("Glass", "Glass / Ceramic Bowl"),
+    "vase": ("Glass", "Glass Container"),
+    "fork": ("Metal", "Scrap Metal Cutlery (Fork)"),
+    "knife": ("Metal", "Scrap Metal Cutlery (Knife)"),
+    "spoon": ("Metal", "Scrap Metal Cutlery (Spoon)"),
+    "scissors": ("Metal", "Scrap Metal Scissors"),
+    "banana": ("Food Waste", "Fruit Scraps / Banana Peel"),
+    "apple": ("Food Waste", "Fruit Scraps / Apple Core"),
+    "sandwich": ("Food Waste", "Food Plate Leftovers"),
+    "orange": ("Food Waste", "Fruit Peels / Citrus"),
+    "broccoli": ("Food Waste", "Vegetable Trimmings / Broccoli"),
+    "carrot": ("Food Waste", "Vegetable Peels / Carrot Trimmings"),
+    "hot dog": ("Food Waste", "Cooked Food Leftovers"),
+    "pizza": ("Food Waste", "Discarded Cooked Food"),
+    "donut": ("Food Waste", "Bakery Waste"),
+    "cake": ("Food Waste", "Discarded Food Scraps"),
+    "potted plant": ("Organic Waste", "Garden Plant / Leaf Waste"),
+    "book": ("Paper", "Clean Paper / Book"),
+    "cell phone": ("E-Waste", "Mobile Phone / Smartphone"),
+    "laptop": ("E-Waste", "Laptop Computer"),
+    "mouse": ("E-Waste", "Computer Mouse"),
+    "keyboard": ("E-Waste", "Computer Keyboard"),
+    "remote": ("E-Waste", "Remote Control / Battery Item"),
+    "tv": ("E-Waste", "Electronic Monitor / Display"),
+    "microwave": ("E-Waste", "Consumer Electronic Appliance"),
+    "oven": ("E-Waste", "Kitchen Electronic Appliance"),
+    "toaster": ("E-Waste", "Electronic Appliance"),
+    "clock": ("E-Waste", "Electronic Clock"),
+    "backpack": ("Textile Waste", "Discarded Backpack / Fabric"),
+    "handbag": ("Textile Waste", "Textile Handbag"),
+    "tie": ("Textile Waste", "Textile Apparel"),
+    "suitcase": ("Textile Waste", "Fabric Luggage"),
+    "umbrella": ("Textile Waste", "Fabric Umbrella Remnant"),
+    "chair": ("Mixed Waste", "Bulky Discarded Furniture"),
+    "couch": ("Mixed Waste", "Bulky Upholstered Furniture"),
+    "bed": ("Mixed Waste", "Bulky Mattress / Furniture"),
+    "dining table": ("Mixed Waste", "Bulky Wood Waste"),
+    "toilet": ("Mixed Waste", "Ceramic Sanitary Waste"),
+    "sink": ("Mixed Waste", "Sanitary Basin Waste"),
+    "refrigerator": ("Mixed Waste", "Major Bulky Appliance"),
+    # Additional generic keywords
     "cardboard": ("Cardboard", "Corrugated Cardboard Box"),
     "glass": ("Glass", "Glass Bottle / Jar"),
     "matel": ("Metal", "Scrap Metal / Can"),
@@ -115,6 +162,7 @@ EXTERNAL_CLASS_MAPPING = {
     "medical": ("Hazardous Waste", "Medical / Hazardous Waste")
 }
 
+
 class BaseInferenceEngine:
     def __init__(self, version: str = "v2.1"):
         self.version = version
@@ -129,88 +177,13 @@ class BaseInferenceEngine:
         raise NotImplementedError
 
 
-class YOLOv8InferenceEngine(BaseInferenceEngine):
+class ResNet50LocalEngine(BaseInferenceEngine):
     """
-    Ultralytics YOLOv8 Neural Object Detector with real bounding box regression
-    and multi-class localization.
-    """
-    def __init__(self, weights_path: Optional[str] = None, version: str = "v2.1"):
-        self.weights_path = weights_path or os.path.join(settings.MODELS_DIR, "yolov8_waste.pt")
-        super().__init__(version=version)
-
-    def load_model(self):
-        try:
-            from ultralytics import YOLO
-            if os.path.exists(self.weights_path):
-                self.model = YOLO(self.weights_path)
-                self.is_loaded = True
-                logger.info(f"Loaded YOLOv8 model from {self.weights_path}")
-            else:
-                logger.warning(f"YOLO weights not found at {self.weights_path}. Model load deferred.")
-                self.model = None
-                self.is_loaded = False
-        except Exception as e:
-            logger.error(f"Failed to load YOLO model: {e}")
-            self.model = None
-            self.is_loaded = False
-
-    def predict(self, image: Image.Image) -> Dict[str, Any]:
-        t0 = time.time()
-        if not self.is_loaded or self.model is None:
-            return {"success": False, "error": "YOLO model not loaded"}
-
-        # Run Ultralytics inference
-        results = self.model(image, verbose=False)
-        latency_ms = round((time.time() - t0) * 1000, 2)
-
-        detections = []
-        w, h = image.size
-
-        for r in results:
-            boxes = r.boxes
-            if boxes is None:
-                continue
-            for box in boxes:
-                # Normalized coordinates [ymin, xmin, ymax, xmax]
-                xyxy = box.xyxy[0].tolist()
-                xmin = round(max(0.0, min(1.0, xyxy[0] / w)), 4)
-                ymin = round(max(0.0, min(1.0, xyxy[1] / h)), 4)
-                xmax = round(max(0.0, min(1.0, xyxy[2] / w)), 4)
-                ymax = round(max(0.0, min(1.0, xyxy[3] / h)), 4)
-
-                conf = round(float(box.conf[0].item()), 4)
-                cls_id = int(box.cls[0].item())
-                raw_name = self.model.names.get(cls_id, "trash").lower()
-
-                cat, item_name = EXTERNAL_CLASS_MAPPING.get(raw_name, ("Mixed Waste", raw_name.title()))
-                color = CATEGORY_COLORS.get(cat, "#3B82F6")
-
-                detections.append({
-                    "object_name": item_name,
-                    "raw_class": raw_name,
-                    "waste_category": cat,
-                    "confidence": conf,
-                    "confidence_pct": int(conf * 100),
-                    "bounding_box": [ymin, xmin, ymax, xmax],
-                    "bbox_xywh": [xmin, ymin, round(xmax - xmin, 4), round(ymax - ymin, 4)],
-                    "color": color
-                })
-
-        return {
-            "success": True,
-            "latency_ms": latency_ms,
-            "detections": detections,
-            "count": len(detections)
-        }
-
-
-class TorchvisionClassifierEngine(BaseInferenceEngine):
-    """
-    MobileNetV3 PyTorch Classifier fine-tuned across 11 municipal categories.
-    Used for full-frame classification, single-object verification, and continuous retraining.
+    Local ResNet50 Image Classification Engine using authoritative waste_resnet50.pth.
+    Used for image uploads, citizen contributions, and single-object classification.
     """
     def __init__(self, weights_path: Optional[str] = None, version: str = "v2.1"):
-        self.weights_path = weights_path or os.path.join(settings.MODELS_DIR, f"classifier_{version}.pt")
+        self.weights_path = weights_path or os.path.join(settings.MODELS_DIR, "waste_resnet50.pth")
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -219,36 +192,49 @@ class TorchvisionClassifierEngine(BaseInferenceEngine):
         super().__init__(version=version)
 
     def load_model(self):
+        if not os.path.exists(self.weights_path):
+            logger.warning(f"ResNet50 weights not found at {self.weights_path}. Model load deferred.")
+            self.model = None
+            self.is_loaded = False
+            return
+
         try:
-            import torchvision.models as models
-            import torch.nn as nn
-            self.model = models.mobilenet_v3_small(weights=None)
-            self.model.classifier[3] = nn.Linear(self.model.classifier[3].in_features, len(MUNICIPAL_CATEGORIES))
+            sd = torch.load(self.weights_path, map_location=self.device, weights_only=True)
+            out_features = 2
+            if "fc.3.weight" in sd:
+                out_features = sd["fc.3.weight"].shape[0]
+            elif "fc.weight" in sd:
+                out_features = sd["fc.weight"].shape[0]
 
-            if os.path.exists(self.weights_path):
-                state_dict = torch.load(self.weights_path, map_location=self.device)
-                self.model.load_state_dict(state_dict)
-                logger.info(f"Loaded classifier weights from {self.weights_path}")
+            self.num_classes = out_features
+            base_model = models.resnet50()
+
+            if "fc.3.weight" in sd:
+                base_model.fc = torch.nn.Sequential(
+                    torch.nn.Linear(2048, 512),
+                    torch.nn.ReLU(inplace=True),
+                    torch.nn.Dropout(0.2),
+                    torch.nn.Linear(512, out_features)
+                )
             else:
-                # Pretrained feature extractor backbone initialization
-                base_pretrained = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
-                # Transfer backbone weights
-                self.model.features.load_state_dict(base_pretrained.features.state_dict())
-                os.makedirs(os.path.dirname(self.weights_path), exist_ok=True)
-                torch.save(self.model.state_dict(), self.weights_path)
-                logger.info(f"Initialized new baseline weights at {self.weights_path}")
+                base_model.fc = torch.nn.Linear(2048, out_features)
 
-            self.model.eval()
+            base_model.load_state_dict(sd, strict=True)
+            base_model.to(self.device)
+            base_model.eval()
+
+            self.model = base_model
             self.is_loaded = True
+            logger.info(f"Loaded ResNet50 from {self.weights_path} with {out_features} output classes.")
         except Exception as e:
-            logger.error(f"Failed to load MobileNet classifier: {e}")
+            logger.error(f"Failed to load ResNet50 local model: {e}")
             self.model = None
             self.is_loaded = False
 
     def predict(self, image: Image.Image) -> Dict[str, Any]:
         t0 = time.time()
         if not self.is_loaded or self.model is None:
-            return {"success": False, "error": "Classifier model not loaded"}
+            return {"success": False, "error": "ResNet50 model not loaded"}
 
         try:
             tensor = self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
@@ -256,61 +242,204 @@ class TorchvisionClassifierEngine(BaseInferenceEngine):
                 logits = self.model(tensor)
                 probs = torch.softmax(logits, dim=1)[0]
 
-            top_probs, top_indices = torch.topk(probs, k=3)
             latency_ms = round((time.time() - t0) * 1000, 2)
+            prob_list = probs.tolist()
 
-            top_cat = MUNICIPAL_CATEGORIES[top_indices[0].item()]
-            top_conf = round(top_probs[0].item(), 4)
+            if getattr(self, "num_classes", 2) == 2:
+                p0 = round(prob_list[0], 4)
+                p1 = round(prob_list[1], 4)
+                if p0 >= p1:
+                    top_category = "Organic Waste"
+                    detected_item = "Organic / Biodegradable Waste"
+                    top_conf = p0
+                else:
+                    top_category = "Plastic"
+                    detected_item = "Recyclable Solid Waste (Plastic / Packaging)"
+                    top_conf = p1
 
-            top_predictions = []
-            for p, idx in zip(top_probs.tolist(), top_indices.tolist()):
-                top_predictions.append({
-                    "waste_category": MUNICIPAL_CATEGORIES[idx],
-                    "confidence": round(p, 4),
-                    "confidence_pct": int(p * 100)
-                })
+                top_preds = [
+                    {"category": "Organic Waste", "confidence": p0, "confidence_pct": int(p0 * 100)},
+                    {"category": "Recyclable Solid Waste", "confidence": p1, "confidence_pct": int(p1 * 100)}
+                ]
+            else:
+                top_k = min(3, len(prob_list))
+                top_probs, top_indices = torch.topk(probs, k=top_k)
+                top_idx = top_indices[0].item()
+                top_category = MUNICIPAL_CATEGORIES[top_idx % len(MUNICIPAL_CATEGORIES)]
+                top_conf = round(top_probs[0].item(), 4)
+                detected_item = f"{top_category} Material"
+
+                top_preds = []
+                for p, idx in zip(top_probs.tolist(), top_indices.tolist()):
+                    cat = MUNICIPAL_CATEGORIES[idx % len(MUNICIPAL_CATEGORIES)]
+                    top_preds.append({
+                        "category": cat,
+                        "confidence": round(p, 4),
+                        "confidence_pct": int(p * 100)
+                    })
 
             return {
                 "success": True,
-                "latency_ms": latency_ms,
-                "top_category": top_cat,
+                "task": "image_classification",
+                "model_name": "ResNet50-WasteClassifier",
+                "model_version": self.version,
+                "framework": "PyTorch 2.2 / ResNet50",
+                "predicted_category": top_category,
+                "detected_item": detected_item,
                 "confidence": top_conf,
                 "confidence_pct": int(top_conf * 100),
-                "top_predictions": top_predictions
+                "top_predictions": top_preds,
+                "bounding_box": [0.10, 0.10, 0.90, 0.90],
+                "bbox_xywh": [0.10, 0.10, 0.80, 0.80],
+                "color": CATEGORY_COLORS.get(top_category, "#3B82F6"),
+                "latency_ms": latency_ms
             }
         except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+class YOLO11nLocalEngine(BaseInferenceEngine):
+    """
+    Local YOLO11n Object Detector using authoritative yolo11n.pt.
+    Used for live camera frames, truck scanners, and real-time bounding box localization.
+    """
+    def __init__(self, weights_path: Optional[str] = None, version: str = "v2.1"):
+        self.weights_path = weights_path or os.path.join(settings.MODELS_DIR, "yolo11n.pt")
+        super().__init__(version=version)
+
+    def load_model(self):
+        if not os.path.exists(self.weights_path):
+            logger.warning(f"YOLO11n weights not found at {self.weights_path}. Model load deferred.")
+            self.model = None
+            self.is_loaded = False
+            return
+
+        try:
+            from ultralytics import YOLO
+            self.model = YOLO(self.weights_path)
+            self.is_loaded = True
+            logger.info(f"Loaded YOLO11n model from {self.weights_path}")
+        except Exception as e:
+            logger.error(f"Failed to load YOLO11n model: {e}")
+            self.model = None
+            self.is_loaded = False
+
+    def predict(self, image: Image.Image, conf_threshold: float = 0.25) -> Dict[str, Any]:
+        t0 = time.time()
+        if not self.is_loaded or self.model is None:
+            return {"success": False, "error": "YOLO11n model not loaded"}
+
+        try:
+            results = self.model(image, conf=conf_threshold, verbose=False)
+            latency_ms = round((time.time() - t0) * 1000, 2)
+
+            detections = []
+            w, h = image.size
+
+            for r in results:
+                boxes = r.boxes
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    xyxy = box.xyxy[0].tolist()
+                    xmin = round(max(0.0, min(1.0, xyxy[0] / max(1, w))), 4)
+                    ymin = round(max(0.0, min(1.0, xyxy[1] / max(1, h))), 4)
+                    xmax = round(max(0.0, min(1.0, xyxy[2] / max(1, w))), 4)
+                    ymax = round(max(0.0, min(1.0, xyxy[3] / max(1, h))), 4)
+
+                    conf = round(float(box.conf[0].item()), 4)
+                    cls_id = int(box.cls[0].item())
+                    raw_name = self.model.names.get(cls_id, "waste_object").lower()
+
+                    cat, item_name = EXTERNAL_CLASS_MAPPING.get(raw_name, ("Mixed Waste", raw_name.title()))
+                    color = CATEGORY_COLORS.get(cat, "#3B82F6")
+
+                    detections.append({
+                        "object_name": item_name,
+                        "raw_class": raw_name,
+                        "waste_category": cat,
+                        "confidence": conf,
+                        "confidence_pct": int(conf * 100),
+                        "bounding_box": [ymin, xmin, ymax, xmax],
+                        "bbox_xywh": [xmin, ymin, round(xmax - xmin, 4), round(ymax - ymin, 4)],
+                        "color": color
+                    })
+
+            detections.sort(key=lambda d: d["confidence"], reverse=True)
+
+            if detections:
+                top = detections[0]
+                top_cat = top["waste_category"]
+                top_item = top["object_name"]
+                top_conf = top["confidence"]
+                top_bbox = top["bounding_box"]
+                top_bbox_xywh = top["bbox_xywh"]
+                top_color = top["color"]
+            else:
+                top_cat = "Mixed Waste"
+                top_item = "Unclassified Waste Stream"
+                top_conf = 0.30
+                top_bbox = [0.10, 0.10, 0.90, 0.90]
+                top_bbox_xywh = [0.10, 0.10, 0.80, 0.80]
+                top_color = "#64748B"
+
+            return {
+                "success": True,
+                "task": "object_detection",
+                "model_name": "YOLO11n-WasteDetector",
+                "model_version": self.version,
+                "framework": "Ultralytics YOLO11",
+                "predicted_category": top_cat,
+                "detected_item": top_item,
+                "confidence": top_conf,
+                "confidence_pct": int(top_conf * 100),
+                "bounding_box": top_bbox,
+                "bbox_xywh": top_bbox_xywh,
+                "color": top_color,
+                "count": len(detections),
+                "detections": detections,
+                "latency_ms": latency_ms
+            }
+        except Exception as e:
+            logger.error(f"YOLO11n predict error: {e}")
             return {"success": False, "error": str(e)}
 
 
 class AIVisionService:
     """
     Centralized Municipal AI Vision Orchestrator.
-    Manages active model versions, runs real YOLOv8 object localization or MobileNet classification,
-    and extracts 128-d visual feature embeddings for personal AI memory.
+    Manages task-aware routing (Uploads -> ResNet50, Frames -> YOLO11n),
+    connects to standalone AI microservice or local neural weights,
+    and invokes the classical CV fallback algorithm under documented failure conditions.
     """
-    _active_yolo_engine: Optional[YOLOv8InferenceEngine] = None
-    _active_classifier_engine: Optional[TorchvisionClassifierEngine] = None
+    _active_resnet_engine: Optional[ResNet50LocalEngine] = None
+    _active_yolo_engine: Optional[YOLO11nLocalEngine] = None
     _active_version: str = "v2.1"
 
     @classmethod
-    def get_engines(cls) -> Tuple[YOLOv8InferenceEngine, TorchvisionClassifierEngine]:
+    def get_engines(cls) -> Tuple[ResNet50LocalEngine, YOLO11nLocalEngine]:
+        if cls._active_resnet_engine is None:
+            cls._active_resnet_engine = ResNet50LocalEngine(version=cls._active_version)
         if cls._active_yolo_engine is None:
-            cls._active_yolo_engine = YOLOv8InferenceEngine(version=cls._active_version)
-        if cls._active_classifier_engine is None:
-            cls._active_classifier_engine = TorchvisionClassifierEngine(version=cls._active_version)
-        return cls._active_yolo_engine, cls._active_classifier_engine
+            cls._active_yolo_engine = YOLO11nLocalEngine(version=cls._active_version)
+        return cls._active_resnet_engine, cls._active_yolo_engine
 
     @classmethod
     def switch_active_model(cls, version: str, weights_path: Optional[str] = None) -> bool:
-        """Atomically switches the active inference model version and reloads weights."""
+        """Atomically switches active inference model version."""
         try:
             cls._active_version = version
-            cls._active_yolo_engine = YOLOv8InferenceEngine(weights_path=weights_path, version=version)
-            cls._active_classifier_engine = TorchvisionClassifierEngine(weights_path=weights_path, version=version)
-            logger.info(f"Switched active AI Vision model to {version}")
+            if weights_path and "resnet" in weights_path.lower():
+                cls._active_resnet_engine = ResNet50LocalEngine(weights_path=weights_path, version=version)
+            elif weights_path and "yolo" in weights_path.lower():
+                cls._active_yolo_engine = YOLO11nLocalEngine(weights_path=weights_path, version=version)
+            else:
+                cls._active_resnet_engine = ResNet50LocalEngine(version=version)
+                cls._active_yolo_engine = YOLO11nLocalEngine(version=version)
+            logger.info(f"Switched active AI Vision models to version {version}")
             return True
         except Exception as e:
-            logger.error(f"Failed to switch model to {version}: {e}")
+            logger.error(f"Failed to switch models to {version}: {e}")
             return False
 
     @staticmethod
@@ -319,7 +448,7 @@ class AIVisionService:
 
     @staticmethod
     def calculate_blur_score(image: Image.Image) -> float:
-        """Calculates sharpness score using Laplacian gradient variance."""
+        """Sharpness score using Laplacian gradient variance."""
         try:
             gray = image.convert('L')
             arr = np.array(gray, dtype=np.float32)
@@ -340,37 +469,34 @@ class AIVisionService:
         current_hash: str
     ) -> Tuple[bool, str, float]:
         width, height = image.size
-        if width < 120 or height < 120:
-            return False, "Image resolution too low (minimum 120x120 required)", 15.0
+        if width < 80 or height < 80:
+            return False, "Image resolution too low (minimum 80x80 required)", 15.0
 
-        if file_size_kb < 3.0:
-            return False, "File size suspiciously small (<3KB)", 10.0
+        if file_size_kb < 1.0:
+            return False, "File size suspiciously small (<1KB)", 10.0
 
         if current_hash in existing_hashes:
             return False, "Duplicate image already exists in dataset", 50.0
 
         blur = AIVisionService.calculate_blur_score(image)
-        if blur < 22.0:
-            return False, f"Image appears too blurry (sharpness score {blur}/100)", blur
+        if blur < 15.0:
+            return False, f"Image appears excessively blurry (sharpness score {blur}/100)", blur
 
         return True, "Image passed quality validation pipeline", blur
 
     @staticmethod
     def extract_image_embedding(image: Image.Image) -> List[float]:
-        """
-        Extracts a dense 128-dimensional normalized visual feature embedding vector
-        capturing spatial color distribution, edge gradients, and morphology.
-        """
+        """Dense 128-d normalized visual feature embedding vector for personal AI memory."""
         try:
             rgb_img = image.convert("RGB").resize((64, 64))
             arr = np.array(rgb_img, dtype=np.float32) / 255.0
 
-            # 1. 8x8 Grid Spatial Luminance (64 dims)
+            # 8x8 Grid Spatial Luminance (64 dims)
             grid_img = rgb_img.resize((8, 8), Image.Resampling.BOX)
             grid_arr = np.array(grid_img, dtype=np.float32) / 255.0
             luminance = (0.299 * grid_arr[:, :, 0] + 0.587 * grid_arr[:, :, 1] + 0.114 * grid_arr[:, :, 2]).flatten()
 
-            # 2. Quadrant Directional Edge Gradients (32 dims)
+            # Quadrant Edge Gradients (32 dims)
             gray = image.convert("L").resize((64, 64))
             gray_arr = np.array(gray, dtype=np.float32)
             edge_features = []
@@ -389,29 +515,21 @@ class AIVisionService:
                     ])
             edge_features = np.array(edge_features[:32], dtype=np.float32)
 
-            # 3. Geometric Morphology & Aspect Ratio (16 dims)
+            # Morphology (16 dims)
             w, h = image.size
             aspect_ratio = float(w) / float(max(1, h))
             morph_features = np.array([
-                aspect_ratio,
-                float(h) / float(max(1, w)),
-                float(1.6 <= aspect_ratio <= 2.4),
-                float(1.25 <= aspect_ratio <= 1.55),
-                float(0.85 <= aspect_ratio <= 1.15),
-                float(np.mean(arr)),
-                float(np.std(arr)),
-                float(np.mean(arr[:, :, 0])),
-                float(np.mean(arr[:, :, 1])),
-                float(np.mean(arr[:, :, 2])),
-                float(np.max(arr) - np.min(arr)),
-                float(np.median(arr)),
-                float(len(arr[arr > 0.8]) / arr.size),
-                float(len(arr[arr < 0.2]) / arr.size),
-                float(np.var(arr[:, :, 0])),
-                float(np.var(arr[:, :, 1]))
+                aspect_ratio, float(h) / float(max(1, w)),
+                float(1.6 <= aspect_ratio <= 2.4), float(1.25 <= aspect_ratio <= 1.55),
+                float(0.85 <= aspect_ratio <= 1.15), float(np.mean(arr)),
+                float(np.std(arr)), float(np.mean(arr[:, :, 0])),
+                float(np.mean(arr[:, :, 1])), float(np.mean(arr[:, :, 2])),
+                float(np.max(arr) - np.min(arr)), float(np.median(arr)),
+                float(len(arr[arr > 0.8]) / arr.size), float(len(arr[arr < 0.2]) / arr.size),
+                float(np.var(arr[:, :, 0])), float(np.var(arr[:, :, 1]))
             ], dtype=np.float32)
 
-            # 4. Texture frequency bands (16 dims)
+            # Texture frequency bands (16 dims)
             h_diffs = np.abs(np.diff(gray_arr, axis=1))
             tex_features = []
             for band in range(8):
@@ -445,81 +563,91 @@ class AIVisionService:
             return 0.0
 
     @classmethod
-    def _run_primary_model(cls, image: Image.Image) -> Optional[Dict[str, Any]]:
-        """Executes primary deep learning inference (Remote AI Microservice or local YOLO/MobileNet) on input image."""
-        # Check if remote AI microservice is configured
-        if settings.AI_INFERENCE_URL and settings.AI_INFERENCE_URL.strip():
+    def _run_primary_model(
+        cls,
+        image: Image.Image,
+        task: str = "classification"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Executes primary deep learning inference:
+        - Image uploads -> ResNet50 (waste_resnet50.pth)
+        - Camera frames -> YOLO11n (yolo11n.pt)
+        Checks remote microservice if configured, else executes local PyTorch engine.
+        """
+        # 1. Try remote AI microservice if configured
+        if settings.AI_SERVICE_BASE_URL and settings.AI_SERVICE_BASE_URL.strip():
             try:
-                import io
-                import requests
-                buf = io.BytesIO()
-                image.save(buf, format="JPEG")
-                buf.seek(0)
-                headers = {}
-                if settings.AI_INFERENCE_API_KEY:
-                    headers["Authorization"] = f"Bearer {settings.AI_INFERENCE_API_KEY}"
-                    headers["X-API-Key"] = settings.AI_INFERENCE_API_KEY
-                endpoint = f"{settings.AI_INFERENCE_URL.rstrip('/')}/predict"
-                resp = requests.post(
-                    endpoint,
-                    files={"file": ("frame.jpg", buf.getvalue(), "image/jpeg")},
-                    headers=headers,
-                    timeout=settings.INFERENCE_TIMEOUT_SECONDS
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    cat = data.get("predicted_category") or data.get("category")
-                    conf = float(data.get("confidence", 0.0))
+                from app.services.ai_client import AIServiceClient
+                if task in ("detection", "detect", "frame"):
+                    data = AIServiceClient.detect_frame(image)
+                else:
+                    data = AIServiceClient.classify_image(image)
+
+                cat = data.get("predicted_category")
+                conf = float(data.get("confidence", 0.0))
+                return {
+                    "predicted_category": cat,
+                    "detected_item": data.get("detected_item") or f"{cat} Item",
+                    "confidence": conf,
+                    "confidence_pct": int(data.get("confidence_pct", conf * 100)),
+                    "bounding_box": data.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
+                    "bbox_xywh": data.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
+                    "color": data.get("color", CATEGORY_COLORS.get(cat, "#3B82F6")),
+                    "classification_method": f"remote_ai_service_{task}",
+                    "latency_ms": data.get("latency_ms", 35.0),
+                    "model_name": data.get("model_name", "Remote-AI-Service"),
+                    "model_version": data.get("model_version", cls._active_version),
+                    "model_framework": data.get("framework", "PyTorch 2.2"),
+                    "detections": data.get("detections", [])
+                }
+            except Exception as e:
+                logger.warning(f"Remote AI microservice unavailable (using local fallback engine): {e}")
+
+        # 2. Local Engine Execution
+        resnet_engine, yolo_engine = cls.get_engines()
+
+        if task in ("detection", "detect", "frame"):
+            if yolo_engine and yolo_engine.is_loaded:
+                res = yolo_engine.predict(image)
+                if res.get("success"):
+                    return {
+                        "predicted_category": res.get("predicted_category"),
+                        "detected_item": res.get("detected_item"),
+                        "confidence": res.get("confidence", 0.0),
+                        "confidence_pct": res.get("confidence_pct", 0),
+                        "bounding_box": res.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
+                        "bbox_xywh": res.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
+                        "color": res.get("color", "#3B82F6"),
+                        "classification_method": "yolo11n",
+                        "model_name": "YOLO11n-WasteDetector",
+                        "model_version": cls._active_version,
+                        "model_framework": "Ultralytics YOLO11",
+                        "latency_ms": res.get("latency_ms", 18.0),
+                        "detections": res.get("detections", [])
+                    }
+        else:
+            # Classification task -> ResNet50
+            if resnet_engine and resnet_engine.is_loaded:
+                res = resnet_engine.predict(image)
+                if res.get("success"):
+                    cat = res.get("predicted_category")
+                    conf = res.get("confidence", 0.0)
                     return {
                         "predicted_category": cat,
-                        "detected_item": data.get("detected_item") or data.get("item", f"{cat} Item"),
+                        "detected_item": res.get("detected_item"),
                         "confidence": conf,
-                        "confidence_pct": int(data.get("confidence_pct", conf * 100)),
-                        "bounding_box": data.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
-                        "bbox_xywh": data.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
-                        "color": data.get("color", CATEGORY_COLORS.get(cat, "#3B82F6")),
-                        "classification_method": "remote_ai_service",
-                        "latency_ms": data.get("latency_ms", 45.0)
+                        "confidence_pct": int(conf * 100),
+                        "bounding_box": [0.10, 0.10, 0.90, 0.90],
+                        "bbox_xywh": [0.10, 0.10, 0.80, 0.80],
+                        "color": CATEGORY_COLORS.get(cat, "#3B82F6"),
+                        "classification_method": "resnet50",
+                        "model_name": "ResNet50-WasteClassifier",
+                        "model_version": cls._active_version,
+                        "model_framework": "PyTorch 2.2 / ResNet50",
+                        "latency_ms": res.get("latency_ms", 22.0),
+                        "top_predictions": res.get("top_predictions", [])
                     }
-                else:
-                    logger.warning(f"Remote AI inference failed with HTTP {resp.status_code}: {resp.text}")
-            except Exception as e:
-                logger.warning(f"Remote AI inference request exception: {e}")
 
-        yolo_engine, classifier_engine = cls.get_engines()
-        if yolo_engine and yolo_engine.is_loaded:
-            yolo_res = yolo_engine.predict(image)
-            if yolo_res.get("success") and yolo_res.get("detections"):
-                top_det = yolo_res["detections"][0]
-                return {
-                    "predicted_category": top_det.get("waste_category"),
-                    "detected_item": top_det.get("object_name"),
-                    "confidence": top_det.get("confidence", 0),
-                    "confidence_pct": top_det.get("confidence_pct", 0),
-                    "bounding_box": top_det.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
-                    "bbox_xywh": top_det.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
-                    "color": top_det.get("color", "#3B82F6"),
-                    "classification_method": "primary_ai",
-                    "latency_ms": yolo_res.get("latency_ms", 15.0),
-                    "all_detections": yolo_res.get("detections")
-                }
-
-        if classifier_engine and classifier_engine.is_loaded:
-            cls_res = classifier_engine.predict(image)
-            if cls_res.get("success"):
-                top_cat = cls_res.get("top_category")
-                conf = cls_res.get("confidence", 0)
-                return {
-                    "predicted_category": top_cat,
-                    "detected_item": f"{top_cat} Material",
-                    "confidence": conf,
-                    "confidence_pct": int(conf * 100),
-                    "bounding_box": [0.1, 0.1, 0.9, 0.9],
-                    "bbox_xywh": [0.1, 0.1, 0.8, 0.8],
-                    "color": CATEGORY_COLORS.get(top_cat, "#3B82F6"),
-                    "classification_method": "primary_ai",
-                    "latency_ms": cls_res.get("latency_ms", 25.0)
-                }
         return None
 
     @classmethod
@@ -527,17 +655,17 @@ class AIVisionService:
         cls,
         image: Image.Image,
         filename_hint: str = "",
+        task: str = "classification",
         force_fallback: bool = False,
         primary_should_fail: bool = False
     ) -> Dict[str, Any]:
         """
-        Centralized Municipal AI Vision Orchestrator with Mandatory Fallback:
-        1. Validates and extracts 128-d visual feature embedding.
-        2. Tries primary neural model (Ultralytics YOLO / MobileNet) unless force_fallback is set.
-        3. If primary succeeds with confidence >= threshold and valid category, returns primary result.
-        4. If primary fails, times out, raises exception, or yields low confidence:
-           Activates mandatory classical CV and rule-based heuristic fallback algorithm!
-        5. Returns structured diagnostic response detailing method, fallback status, and confidence.
+        Inference Orchestrator with Mandatory Fallback:
+        1. Routes still images to ResNet50 and live frames to YOLO11n.
+        2. If primary model succeeds with confidence >= threshold and valid category, returns primary result.
+        3. If primary model fails, times out, raises exception, or yields low confidence:
+           Activates classical CV multi-cue heuristic fallback algorithm!
+        4. Distinguishes primary vs fallback in output metadata.
         """
         t0 = time.time()
         embedding = cls.extract_image_embedding(image)
@@ -545,26 +673,59 @@ class AIVisionService:
         primary_status = "unavailable"
         primary_result = None
 
-        # Step 1: Attempt Primary Deep Learning Neural Inference
+        # Determine task from filename or hints if not explicitly set
+        fn = filename_hint.lower()
+        if task == "classification" and any(k in fn for k in ["frame", "cam", "video", "truck"]):
+            task = "detection"
+
+        # Step 1: Attempt Primary Neural Model
         if not force_fallback and not primary_should_fail:
             try:
-                prim = cls._run_primary_model(image)
-                if prim and prim.get("confidence", 0) >= settings.AI_CONFIDENCE_THRESHOLD and prim.get("predicted_category") in MUNICIPAL_CATEGORIES:
+                prim = cls._run_primary_model(image, task=task)
+                is_detection = task in ("detection", "detect", "frame")
+                if prim and is_detection:
+                    # Detection task: YOLO successfully analyzed frame
+                    has_dets = bool(prim.get("detections"))
+                    top_conf = prim.get("confidence", 0.0)
+                    primary_status = "success"
+                    primary_result = {
+                        "predicted_category": prim.get("predicted_category", "No Objects Detected") if has_dets else "Empty Conveyor",
+                        "detected_item": prim.get("detected_item", "Detected Object") if has_dets else "Clear Conveyor Stream",
+                        "confidence": top_conf if has_dets else 0.95,
+                        "confidence_pct": int(top_conf * 100) if has_dets else 95,
+                        "bounding_box": prim.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
+                        "bbox_xywh": prim.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
+                        "color": prim.get("color", "#3B82F6"),
+                        "classification_method": prim.get("classification_method", "yolo11n"),
+                        "primary_model_status": "success",
+                        "fallback_used": False,
+                        "requires_review": False,
+                        "latency_ms": prim.get("latency_ms", round((time.time() - t0) * 1000, 2)),
+                        "model_name": prim.get("model_name", "YOLO11n-WasteDetector"),
+                        "model_version": prim.get("model_version", cls._active_version),
+                        "model_framework": prim.get("model_framework", "Ultralytics YOLO11"),
+                        "detections": prim.get("detections", []),
+                        "stage_notes": f"YOLO11n frame inference executed: {len(prim.get('detections', []))} detections"
+                    }
+                elif prim and prim.get("confidence", 0) >= settings.AI_CONFIDENCE_THRESHOLD and prim.get("predicted_category") in MUNICIPAL_CATEGORIES:
                     primary_status = "success"
                     primary_result = {
                         "predicted_category": prim["predicted_category"],
                         "detected_item": prim.get("detected_item", f"{prim['predicted_category']} Item"),
                         "confidence": prim["confidence"],
                         "confidence_pct": prim.get("confidence_pct", int(prim["confidence"] * 100)),
-                        "bounding_box": prim.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
-                        "bbox_xywh": prim.get("bbox_xywh", [0.1, 0.1, 0.8, 0.8]),
+                        "bounding_box": prim.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
+                        "bbox_xywh": prim.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
                         "color": prim.get("color", CATEGORY_COLORS.get(prim["predicted_category"], "#3B82F6")),
                         "classification_method": prim.get("classification_method", "primary_ai"),
                         "primary_model_status": "success",
                         "fallback_used": False,
                         "requires_review": False,
                         "latency_ms": prim.get("latency_ms", round((time.time() - t0) * 1000, 2)),
-                        "stage_notes": f"Primary neural model ({cls._active_version}) executed successfully"
+                        "model_name": prim.get("model_name", "ResNet50-WasteClassifier"),
+                        "model_version": prim.get("model_version", cls._active_version),
+                        "model_framework": prim.get("model_framework", "PyTorch 2.2"),
+                        "stage_notes": f"Primary neural model ({prim.get('model_name', task)}) executed successfully"
                     }
                 elif prim:
                     primary_status = "low_confidence" if prim.get("confidence", 0) < settings.AI_CONFIDENCE_THRESHOLD else "invalid_label"
@@ -579,8 +740,6 @@ class AIVisionService:
         # If primary succeeded with high confidence, return primary result
         if primary_result is not None:
             primary_result.update({
-                "model_version": cls._active_version,
-                "model_framework": "PyTorch 2.2 / YOLOv8-Waste",
                 "embedding": embedding,
                 "status": "High Confidence Detection",
                 "is_low_confidence": False,
@@ -588,7 +747,7 @@ class AIVisionService:
             })
             return primary_result
 
-        # Step 2: Primary Model Unusable/Failed -> Trigger Mandatory Fallback Algorithm
+        # Step 2: Primary Model Failed / Low Confidence -> Activate Fallback
         logger.info(f"Primary AI model unusable (status: {primary_status}). Activating classical CV fallback algorithm.")
         try:
             fallback_res = AIFallbackService.classify_with_fallback(image, filename_hint=filename_hint)
@@ -604,8 +763,8 @@ class AIVisionService:
                 "primary_model_status": primary_status,
                 "fallback_used": True,
                 "requires_review": True,
-                "bounding_box": [0.1, 0.1, 0.9, 0.9],
-                "bbox_xywh": [0.1, 0.1, 0.8, 0.8],
+                "bounding_box": [0.10, 0.10, 0.90, 0.90],
+                "bbox_xywh": [0.10, 0.10, 0.80, 0.80],
                 "color": "#94A3B8",
                 "embedding": embedding,
                 "fallback_details": {"error": str(e), "primary_status": primary_status},
@@ -617,23 +776,66 @@ class AIVisionService:
             "primary_model_status": primary_status,
             "model_version": cls._active_version,
             "model_framework": "OpenCV Classical CV / Heuristic Fallback",
+            "model_name": "ClassicalCV-FallbackEngine",
             "embedding": embedding,
             "status": "Fallback Heuristic Classification" if not fallback_res.get("requires_review") else "Uncertain — Needs Verification",
-            "is_low_confidence": fallback_res.get("requires_review", True),
-            "secondary_prediction": {
-                "detected_item": "Mixed Waste",
-                "predicted_category": "Mixed Waste",
-                "confidence": 0.20
-            }
+            "is_low_confidence": fallback_res.get("requires_review", True)
         })
 
-        # Add estimated weight
-        weight_map = {
-            "E-Waste": 0.25, "Plastic": 0.08, "Paper": 0.05, "Cardboard": 0.35,
-            "Glass": 0.45, "Metal": 0.15, "Organic Waste": 0.60, "Food Waste": 0.50,
-            "Textile Waste": 0.30, "Hazardous Waste": 0.20, "Mixed Waste": 0.40,
-            "unknown": 0.25
-        }
-        fallback_res["estimated_weight_kg"] = weight_map.get(fallback_res["predicted_category"], 0.30)
-
         return fallback_res
+
+    @classmethod
+    def classify_upload_image(cls, image: Image.Image, upload_id: Optional[int] = None) -> Dict[str, Any]:
+        """Convenience method for image uploads (routes strictly to ResNet50 classification)."""
+        res = cls.detect_and_classify(image, task="classification")
+        is_fallback = res.get("fallback_used", False)
+        conf = float(res.get("confidence", 0.0))
+        req_rev = res.get("requires_review", False) or conf < 0.70 or is_fallback
+        suitable = (not is_fallback) and (conf >= 0.70) and (not req_rev)
+        
+        return {
+            "prediction_id": f"pred_cls_{int(time.time()*1000)}_{upload_id or 0}",
+            "task": "classification",
+            "model_id": res.get("model_name", "waste_resnet50"),
+            "model_type": "fallback" if is_fallback else ("resnet50" if "resnet" in str(res.get("model_name", "")).lower() else "resnet50"),
+            "predicted_class": res.get("predicted_category", "Unknown"),
+            "confidence": conf,
+            "class_scores": {
+                res.get("predicted_category", "Unknown"): conf,
+                "Other": round(max(0.0, 1.0 - conf), 4)
+            },
+            "bounding_box": res.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+            "fallback_used": is_fallback,
+            "fallback_reason": res.get("fallback_details", {}).get("primary_status") or ("Confidence below threshold" if is_fallback else None),
+            "suitable_for_automated_sorting": suitable,
+            "requires_review": req_rev,
+            "processing_time_ms": res.get("latency_ms", 25.0)
+        }
+
+    @classmethod
+    def detect_camera_frame(cls, image: Image.Image, frame_id: Optional[str] = None) -> Dict[str, Any]:
+        """Convenience method for camera / conveyor / truck frames (routes to YOLO11n detection)."""
+        res = cls.detect_and_classify(image, task="detection")
+        is_fallback = res.get("fallback_used", False)
+        conf = float(res.get("confidence", 0.0))
+        detections = res.get("detections", [])
+        req_rev = res.get("requires_review", False) or conf < 0.70 or is_fallback
+        suitable = (not is_fallback) and (conf >= 0.70) and (not req_rev)
+
+        return {
+            "prediction_id": f"pred_det_{int(time.time()*1000)}_{frame_id or 'cam'}",
+            "task": "detection",
+            "model_id": res.get("model_name", "yolo11n"),
+            "model_type": "fallback" if is_fallback else ("yolo11n" if "yolo" in str(res.get("model_name", "")).lower() else "yolo11n"),
+            "predicted_class": res.get("predicted_category", "Unknown"),
+            "confidence": conf,
+            "detections": detections,
+            "count": len(detections),
+            "bounding_box": res.get("bounding_box", [0.1, 0.1, 0.9, 0.9]),
+            "fallback_used": is_fallback,
+            "fallback_reason": res.get("fallback_details", {}).get("primary_status") or ("Confidence below threshold" if is_fallback else None),
+            "suitable_for_automated_sorting": suitable,
+            "requires_review": req_rev,
+            "processing_time_ms": res.get("latency_ms", 20.0)
+        }
+

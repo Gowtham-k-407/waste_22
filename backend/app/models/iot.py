@@ -48,3 +48,32 @@ class DeviceTelemetry(Base):
     data_source = Column(String, default="live_mqtt") # live_mqtt, simulated_iot, http_ingest
     raw_payload_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IoTSortingRecord(Base):
+    __tablename__ = "iot_sorting_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String, unique=True, index=True, nullable=False) # Idempotent identifier
+    prediction_id = Column(String, index=True, nullable=True)
+    item_label = Column(String, nullable=False) # e.g. "Plastic Waste", "Organic Waste"
+    detected_category = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    is_fallback = Column(Boolean, default=False)
+    
+    # Destination & Routing
+    target_bin = Column(String, nullable=False) # "bin_1_organic", "bin_2_recyclables", "bin_3_scrap_ewaste", "bin_4_reject_chute"
+    bin_index = Column(Integer, nullable=False) # 1, 2, 3, 4
+    
+    # Execution & Safety
+    status = Column(String, nullable=False, index=True) # "executed", "diverted_to_reject", "blocked_safety", "emergency_stopped"
+    rejection_reason = Column(String, nullable=True)
+    actuator_id = Column(String, default="PNEUMATIC_ARM_01")
+    actuator_latency_ms = Column(Float, default=45.0)
+    
+    # Verified physical feedback loop
+    verified_destination = Column(String, nullable=True) # sensor confirmation e.g. "bin_1_organic"
+    sensor_verification_status = Column(String, default="unverified") # "verified", "mismatch", "timeout", "unverified"
+    
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+

@@ -27,26 +27,28 @@ MUNICIPAL_CATEGORIES = [
 ]
 
 CATEGORY_COLORS = {
-    "E-Waste": "#8B5CF6",       # Purple
-    "Plastic": "#3B82F6",       # Blue
-    "Metal": "#64748B",         # Slate
     "Organic Waste": "#10B981", # Emerald
-    "Food Waste": "#84CC16",    # Lime
-    "Glass": "#F59E0B",         # Amber
+    "Food Waste": "#059669",    # Dark Emerald
+    "Plastic": "#3B82F6",       # Blue
     "Paper": "#EAB308",         # Yellow
     "Cardboard": "#D97706",     # Ochre
-    "Hazardous Waste": "#EF4444",# Rose
+    "Glass": "#F59E0B",         # Amber
+    "Metal": "#64748B",         # Slate
     "Textile Waste": "#EC4899", # Pink
+    "E-Waste": "#8B5CF6",       # Purple
+    "Hazardous Waste": "#EF4444",# Red
     "Mixed Waste": "#64748B",   # Gray
     "unknown": "#94A3B8"        # Slate light
 }
 
+
 class AIFallbackService:
     """
-    Mandatory Fallback Waste-Classification Algorithm.
-    Independent classical computer vision and heuristic inference system
-    triggered whenever primary deep learning models (YOLO / MobileNet / Decoupled AI)
-    fail, time out, or produce invalid / low-confidence outputs.
+    Repaired Classical Computer Vision & Heuristic Fallback Engine.
+    Executes multi-cue classical vision analysis (HSV color distribution,
+    contour geometry, aspect ratio, specular reflection, and edge variance)
+    whenever primary neural models (ResNet50 / YOLO11n / Remote Microservice)
+    fail, time out, encounter errors, or yield confidence below the municipal threshold.
     """
 
     @staticmethod
@@ -54,12 +56,11 @@ class AIFallbackService:
         image_input: Union[Image.Image, np.ndarray, bytes]
     ) -> Tuple[bool, Optional[np.ndarray], Optional[str], Optional[str]]:
         """
-        Layer 1: Image validation and preprocessing.
-        Validates dimensions, channel format, corruption, extreme darkness, and severe blur.
-        Returns (is_valid, rgb_numpy_array, error_code, error_message).
+        Layer 1: Input Validation and Normalization.
+        Validates dimensions, channels, corruption, darkness, and excessive blur.
+        Returns: (is_valid, rgb_numpy_array, error_code, error_message).
         """
         try:
-            # 1. Convert input to RGB numpy array
             if isinstance(image_input, bytes):
                 if len(image_input) == 0:
                     return False, None, "EMPTY_PAYLOAD", "Input image payload is empty."
@@ -80,29 +81,28 @@ class AIFallbackService:
                 else:
                     img_rgb = image_input.copy()
             else:
-                return False, None, "UNSUPPORTED_TYPE", "Unsupported image input type."
+                return False, None, "UNSUPPORTED_TYPE", f"Unsupported image input type {type(image_input)}."
 
             h, w = img_rgb.shape[:2]
 
-            # 2. Minimum resolution check
+            # Minimum resolution check
             if h < 32 or w < 32:
                 return False, None, "RESOLUTION_TOO_LOW", f"Image resolution {w}x{h} is below minimum 32x32."
 
-            # 3. Complete pitch black or pure white frame check
             gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
             mean_brightness = float(np.mean(gray))
             std_dev = float(np.std(img_rgb))
 
-            if std_dev == 0.0 and (mean_brightness < 5.0 or mean_brightness > 252.0):
-                return False, None, "BLANK_FRAME", "Frame is completely blank and unusable."
+            # Blank or solid pitch-black/pure-white check
+            if std_dev < 1.0 and (mean_brightness < 8.0 or mean_brightness > 248.0):
+                return False, None, "BLANK_FRAME", "Frame is completely blank or underexposed."
 
-            # 4. Blur check using Laplacian variance on scenes with sufficient contrast
-            gray_std = float(np.std(gray))
+            # Severe blur check
             lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            if lap_var < 1.0 and (w >= 100 and h >= 100) and gray_std >= 15.0:
+            if lap_var < 0.5 and (w >= 100 and h >= 100) and float(np.std(gray)) >= 20.0:
                 return False, None, "IMAGE_TOO_BLURRY", f"Image is excessively blurred (sharpness {lap_var:.1f})."
 
-            # Resize to standardized processing dimensions if excessively large to save CPU
+            # Scale down large images for CPU efficiency
             if max(h, w) > 1024:
                 scale = 1024.0 / max(h, w)
                 img_rgb = cv2.resize(img_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
@@ -110,58 +110,59 @@ class AIFallbackService:
             return True, img_rgb, None, None
 
         except Exception as e:
-            logger.error(f"Fallback validation error: {e}")
+            logger.error(f"Fallback preprocessing exception: {e}")
             return False, None, "PROCESSING_ERROR", str(e)
 
     @staticmethod
     def extract_classical_features(img_rgb: np.ndarray) -> Dict[str, Any]:
         """
-        Layer 2: Classical Computer Vision Feature Extraction.
-        Computes HSV/Lab color distributions, edge density, contour geometry, and texture variance.
+        Layer 2: Multi-Cue Classical Computer Vision Feature Extraction.
         """
         h, w = img_rgb.shape[:2]
-        total_pixels = h * w
+        total_pixels = float(max(1, h * w))
 
-        # 1. Color Space Representations
+        # Color Space Representations
         img_hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
-        img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2Lab)
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
 
-        # HSV Channels: H [0, 179], S [0, 255], V [0, 255]
         h_channel = img_hsv[:, :, 0]
         s_channel = img_hsv[:, :, 1]
         v_channel = img_hsv[:, :, 2]
-
-        # Color fractions
-        green_mask = cv2.inRange(img_hsv, np.array([35, 40, 40]), np.array([85, 255, 255]))
-        blue_mask = cv2.inRange(img_hsv, np.array([90, 50, 40]), np.array([135, 255, 255]))
-        yellow_mask = cv2.inRange(img_hsv, np.array([20, 50, 80]), np.array([35, 255, 255]))
-        brown_cardboard_mask = cv2.inRange(img_hsv, np.array([10, 30, 40]), np.array([25, 200, 200]))
-        red_mask_1 = cv2.inRange(img_hsv, np.array([0, 70, 50]), np.array([10, 255, 255]))
-        red_mask_2 = cv2.inRange(img_hsv, np.array([170, 70, 50]), np.array([180, 255, 255]))
-        red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
-
-        green_ratio = float(np.count_nonzero(green_mask)) / total_pixels
-        blue_ratio = float(np.count_nonzero(blue_mask)) / total_pixels
-        yellow_ratio = float(np.count_nonzero(yellow_mask)) / total_pixels
-        brown_ratio = float(np.count_nonzero(brown_cardboard_mask)) / total_pixels
-        red_ratio = float(np.count_nonzero(red_mask)) / total_pixels
 
         mean_saturation = float(np.mean(s_channel))
         mean_value = float(np.mean(v_channel))
         saturation_var = float(np.var(s_channel))
 
-        # 2. Edge and Contour Features
-        edges = cv2.Canny(gray, 50, 150)
+        # Distinct color mask ratios
+        green_mask = cv2.inRange(img_hsv, np.array([32, 35, 35]), np.array([88, 255, 255]))
+        blue_mask = cv2.inRange(img_hsv, np.array([88, 40, 40]), np.array([135, 255, 255]))
+        yellow_mask = cv2.inRange(img_hsv, np.array([18, 40, 70]), np.array([34, 255, 255]))
+        brown_mask = cv2.inRange(img_hsv, np.array([8, 25, 30]), np.array([24, 210, 210]))
+        red1 = cv2.inRange(img_hsv, np.array([0, 60, 40]), np.array([10, 255, 255]))
+        red2 = cv2.inRange(img_hsv, np.array([170, 60, 40]), np.array([180, 255, 255]))
+        red_mask = cv2.bitwise_or(red1, red2)
+
+        green_ratio = float(np.count_nonzero(green_mask)) / total_pixels
+        blue_ratio = float(np.count_nonzero(blue_mask)) / total_pixels
+        yellow_ratio = float(np.count_nonzero(yellow_mask)) / total_pixels
+        brown_ratio = float(np.count_nonzero(brown_mask)) / total_pixels
+        red_ratio = float(np.count_nonzero(red_mask)) / total_pixels
+
+        # Specular reflection highlights (glossy plastic, polished metal, glass)
+        specular_mask = cv2.inRange(img_hsv, np.array([0, 0, 220]), np.array([180, 45, 255]))
+        specular_ratio = float(np.count_nonzero(specular_mask)) / total_pixels
+
+        # Edge analysis
+        edges = cv2.Canny(gray, 40, 140)
         edge_density = float(np.count_nonzero(edges)) / total_pixels
 
-        # Contours for shape geometry
+        # Contours & Shape geometry
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         largest_area = 0.0
         aspect_ratio = 1.0
-        bounding_box = [0.10, 0.10, 0.90, 0.90] # default normalized [ymin, xmin, ymax, xmax]
-        circularity = 0.0
         rectangularity = 0.0
+        circularity = 0.0
+        bounding_box = [0.10, 0.10, 0.90, 0.90]
 
         if contours:
             largest_c = max(contours, key=cv2.contourArea)
@@ -170,7 +171,7 @@ class AIFallbackService:
             bx, by, bw, bh = cv2.boundingRect(largest_c)
             if bh > 0 and bw > 0:
                 aspect_ratio = float(bw) / float(bh)
-                rect_area = bw * bh
+                rect_area = float(bw * bh)
                 rectangularity = float(largest_area / rect_area) if rect_area > 0 else 0.0
                 bounding_box = [
                     round(max(0.0, min(1.0, by / h)), 4),
@@ -181,11 +182,7 @@ class AIFallbackService:
             if perimeter > 0:
                 circularity = float(4.0 * np.pi * largest_area / (perimeter * perimeter))
 
-        # 3. Specular Reflection (Indicators of Glass, Metal, or Glossy Plastic)
-        specular_mask = cv2.inRange(img_hsv, np.array([0, 0, 240]), np.array([180, 40, 255]))
-        specular_ratio = float(np.count_nonzero(specular_mask)) / total_pixels
-
-        # 4. Texture Variance (Laplacian of Gaussian / Gradient Energy)
+        # Texture gradient energy
         sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         gradient_energy = float(np.mean(sobelx**2 + sobely**2))
@@ -216,9 +213,8 @@ class AIFallbackService:
         filename_hint: str = ""
     ) -> Dict[str, Any]:
         """
-        Layers 3, 4, 5: Heuristic rule-based fallback classification.
-        Evaluates visual feature evidence across canonical categories and assigns
-        transparent heuristic scores and review requirements.
+        Evaluates visual evidence and assigns calibrated heuristic scores.
+        Handles blank, corrupt, or unrecognizable frames safely as 'unknown' + 'requires_review'.
         """
         t0 = time.time()
         is_valid, img_rgb, err_code, err_msg = cls.validate_and_preprocess(image_input)
@@ -230,129 +226,136 @@ class AIFallbackService:
                 "classification_method": "fallback_validation_rejected",
                 "fallback_used": True,
                 "predicted_category": "unknown",
-                "detected_item": "Invalid Image Input",
+                "detected_item": "Unclassified / Corrupted Input",
                 "confidence": 0.0,
+                "confidence_pct": 0,
                 "heuristic_score": 0.0,
                 "requires_review": True,
-                "bounding_box": [0.1, 0.1, 0.9, 0.9],
-                "bbox_xywh": [0.1, 0.1, 0.8, 0.8],
+                "bounding_box": [0.10, 0.10, 0.90, 0.90],
+                "bbox_xywh": [0.10, 0.10, 0.80, 0.80],
                 "color": "#94A3B8",
-                "processing_timestamp": datetime.now(timezone.utc).isoformat()
+                "processing_timestamp": datetime.now(timezone.utc).isoformat(),
+                "stage_notes": f"Fallback input rejected: {err_msg}"
             }
 
         features = cls.extract_classical_features(img_rgb)
-        scores: Dict[str, float] = {cat: 0.10 for cat in MUNICIPAL_CATEGORIES}
-        subitem_names: Dict[str, str] = {cat: f"{cat} Item" for cat in MUNICIPAL_CATEGORIES}
+        scores: Dict[str, float] = {cat: 0.15 for cat in MUNICIPAL_CATEGORIES}
+        subitem_names: Dict[str, str] = {cat: f"{cat} Material" for cat in MUNICIPAL_CATEGORIES}
 
-        # Rule Set 1: Organic / Food Waste
-        # Strong green or yellow-green vegetative coloration with irregular organic contours
-        if features["green_ratio"] > 0.18 or (features["green_ratio"] > 0.08 and features["yellow_ratio"] > 0.10):
-            scores["Organic Waste"] += 0.50 + min(0.30, features["green_ratio"] * 0.8)
-            subitem_names["Organic Waste"] = "Vegetative Organic Plant / Garden Waste"
-        if features["yellow_ratio"] > 0.22 and features["green_ratio"] > 0.05:
-            scores["Food Waste"] += 0.45 + min(0.30, features["yellow_ratio"] * 0.7)
-            subitem_names["Food Waste"] = "Food Waste / Kitchen Scraps"
+        # Multi-cue evidence rules
+        # 1. Organic Waste (leaves, trimmings, coconut husks)
+        if features["green_ratio"] > 0.08:
+            scores["Organic Waste"] += 0.40 + min(0.35, features["green_ratio"] * 0.9)
+            subitem_names["Organic Waste"] = "Vegetative Organic Plant / Leaf Waste"
 
-        # Rule Set 2: Cardboard & Packaging Paper
-        # Earthy brown hue, matte finish, rectangular edges
-        if features["brown_ratio"] > 0.20:
-            scores["Cardboard"] += 0.55 + min(0.25, features["brown_ratio"] * 0.6)
-            subitem_names["Cardboard"] = "Corrugated Cardboard Box / Sheet"
-        elif features["mean_value"] > 180 and features["mean_saturation"] < 40 and features["edge_density"] > 0.04:
-            scores["Paper"] += 0.50 + min(0.25, features["edge_density"] * 2.0)
-            subitem_names["Paper"] = "Clean White / Office Paper"
+        # 2. Food Waste (kitchen wet scraps, yellow/orange peels, food plate leftovers)
+        if features["yellow_ratio"] > 0.12 or (features["green_ratio"] > 0.04 and features["yellow_ratio"] > 0.06):
+            scores["Food Waste"] += 0.38 + min(0.32, (features["yellow_ratio"] + features["green_ratio"]) * 0.7)
+            subitem_names["Food Waste"] = "Food Waste Leftovers / Peels"
 
-        # Rule Set 3: Plastic Containers & Bottles
-        # Blue/cyan packaging spectrum or cylindrical / bottle-like aspect ratio with specular highlights
-        if features["blue_ratio"] > 0.15:
+        # 3. Cardboard & Shipping Packaging (warm brown, kraft cardboard, box aspect)
+        if features["brown_ratio"] > 0.10:
+            scores["Cardboard"] += 0.48 + min(0.30, features["brown_ratio"] * 0.8)
+            subitem_names["Cardboard"] = "Corrugated Cardboard Box / Shipping Carton"
+
+        # 4. Clean Paper (high brightness, low saturation, moderate edge density)
+        if features["mean_value"] > 160 and features["mean_saturation"] < 50:
+            scores["Paper"] += 0.42 + min(0.25, features["edge_density"] * 1.5)
+            subitem_names["Paper"] = "Clean Paper / Newspaper / Office Paper"
+
+        # 5. Plastic (blue packaging, specular sheen, cylindrical / bottle aspect)
+        if features["blue_ratio"] > 0.10:
             scores["Plastic"] += 0.45 + min(0.30, features["blue_ratio"] * 0.8)
             subitem_names["Plastic"] = "Rigid / Flexible Blue Plastic Packaging"
-        if (0.35 <= features["aspect_ratio"] <= 0.65 or 1.5 <= features["aspect_ratio"] <= 2.8) and features["specular_ratio"] > 0.015:
-            scores["Plastic"] += 0.25
-            subitem_names["Plastic"] = "PET Plastic Bottle / Container"
+        ar = features["aspect_ratio"]
+        if (0.30 <= ar <= 0.70 or 1.45 <= ar <= 3.1) and features["specular_ratio"] > 0.005:
+            scores["Plastic"] += 0.30
+            subitem_names["Plastic"] = "PET Plastic Bottle / Plastic Container"
 
-        # Rule Set 4: Glass Bottles & Jars
-        # High specular reflection + high transparency/brightness + circular/cylindrical symmetry
-        if features["specular_ratio"] > 0.035 and features["circularity"] > 0.25:
-            scores["Glass"] += 0.45 + min(0.30, features["specular_ratio"] * 4.0)
+        # 6. Glass (specular highlights + high circularity / cylindrical contour)
+        if features["specular_ratio"] > 0.012 and (features["circularity"] > 0.18 or 0.35 <= ar <= 0.65):
+            scores["Glass"] += 0.40 + min(0.25, features["specular_ratio"] * 5.0)
             subitem_names["Glass"] = "Glass Beverage Bottle / Jar"
 
-        # Rule Set 5: Metal Cans & Scrap
-        # Low saturation, high specular highlights, reflective metallic sheen
-        if features["mean_saturation"] < 45 and features["specular_ratio"] > 0.030 and features["gradient_energy"] > 250:
-            scores["Metal"] += 0.45 + min(0.25, features["specular_ratio"] * 3.5)
+        # 7. Metal (low saturation, metallic sheen, high gradient energy)
+        if features["mean_saturation"] < 55 and features["specular_ratio"] > 0.008 and features["gradient_energy"] > 100:
+            scores["Metal"] += 0.42 + min(0.25, features["specular_ratio"] * 4.0)
             subitem_names["Metal"] = "Aluminum Can / Scrap Metal"
 
-        # Rule Set 6: E-Waste
-        # Dark rectangular silhouette (mobile phone / battery form factor 1.8-2.3) or dense PCB circuitry edges
-        ar = features["aspect_ratio"]
-        if (1.75 <= ar <= 2.35 or 0.42 <= ar <= 0.58) and features["rectangularity"] > 0.60:
-            scores["E-Waste"] += 0.40
+        # 8. E-Waste (phone/tablet form factor 1.6-2.4, dark rectangular body or dense PCB edge density)
+        if (1.6 <= ar <= 2.4 or 0.42 <= ar <= 0.62) and features["rectangularity"] > 0.45:
+            scores["E-Waste"] += 0.38
             subitem_names["E-Waste"] = "Mobile Phone / Electronic Device"
-        if features["edge_density"] > 0.12 and features["green_ratio"] > 0.10: # Green PCB board
-            scores["E-Waste"] += 0.45
-            subitem_names["E-Waste"] = "Electronic Circuit Board / PCB"
+        if features["edge_density"] > 0.09 and features["green_ratio"] > 0.06:
+            scores["E-Waste"] += 0.42
+            subitem_names["E-Waste"] = "Electronic Circuit Board (PCB)"
 
-        # Rule Set 7: Hazardous Waste
-        # Red warning canisters / syringes / biohazard flags
-        if features["red_ratio"] > 0.20:
+        # 9. Hazardous Waste (red warning color or chemical container)
+        if features["red_ratio"] > 0.12:
             scores["Hazardous Waste"] += 0.45 + min(0.30, features["red_ratio"] * 0.8)
-            subitem_names["Hazardous Waste"] = "Hazardous Waste Canister / Chemical Container"
+            subitem_names["Hazardous Waste"] = "Hazardous Waste Container / Medical Item"
 
-        # Rule Set 8: Filename semantic hint reinforcement if available
-        fn = filename_hint.lower()
+        # 10. Filename semantic hint reinforcement if provided
+        fn = (filename_hint or "").lower()
         if fn:
-            keyword_mappings = {
-                "phone": ("E-Waste", "Mobile Phone / Smartphone", 0.40),
-                "mobile": ("E-Waste", "Mobile Phone / Smartphone", 0.40),
-                "battery": ("E-Waste", "Battery / Cell", 0.40),
-                "laptop": ("E-Waste", "Laptop / Computer", 0.40),
-                "plastic": ("Plastic", "Plastic Container / Bottle", 0.35),
-                "bottle": ("Plastic", "Plastic Bottle (PET)", 0.35),
-                "cardboard": ("Cardboard", "Cardboard Box", 0.35),
-                "box": ("Cardboard", "Cardboard Packaging", 0.30),
-                "paper": ("Paper", "Paper / Newspaper", 0.35),
-                "glass": ("Glass", "Glass Bottle / Jar", 0.35),
-                "can": ("Metal", "Aluminum Can", 0.35),
-                "metal": ("Metal", "Scrap Metal", 0.35),
-                "organic": ("Organic Waste", "Organic Waste", 0.35),
-                "leaf": ("Organic Waste", "Garden Plant / Leaf Waste", 0.40),
-                "food": ("Food Waste", "Food Waste Leftovers", 0.40),
+            keywords = {
+                "phone": ("E-Waste", "Mobile Phone / Smartphone", 0.42),
+                "mobile": ("E-Waste", "Mobile Phone / Smartphone", 0.42),
+                "battery": ("E-Waste", "Battery / Cell", 0.42),
+                "laptop": ("E-Waste", "Laptop Computer", 0.42),
+                "plastic": ("Plastic", "Plastic Bottle / Container", 0.38),
+                "bottle": ("Plastic", "Plastic Bottle (PET)", 0.38),
+                "cardboard": ("Cardboard", "Corrugated Cardboard Box", 0.38),
+                "box": ("Cardboard", "Cardboard Packaging", 0.35),
+                "paper": ("Paper", "Clean Paper", 0.38),
+                "glass": ("Glass", "Glass Bottle / Jar", 0.38),
+                "can": ("Metal", "Aluminum Beverage Can", 0.38),
+                "metal": ("Metal", "Scrap Metal / Can", 0.38),
+                "organic": ("Organic Waste", "Organic Garden Waste", 0.40),
+                "leaf": ("Organic Waste", "Garden Plant / Leaf Waste", 0.42),
+                "food": ("Food Waste", "Food Waste Leftovers", 0.42),
                 "syringe": ("Hazardous Waste", "Medical Waste / Syringe", 0.45)
             }
-            for kw, (hint_cat, hint_item, boost) in keyword_mappings.items():
+            for kw, (hint_cat, hint_item, boost) in keywords.items():
                 if kw in fn:
                     scores[hint_cat] += boost
                     subitem_names[hint_cat] = hint_item
                     break
 
-        # Sort candidate categories by heuristic score
-        sorted_candidates = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        top_category, top_raw_score = sorted_candidates[0]
+        # Sort candidate categories by score
+        sorted_scores = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        top_cat, top_raw_score = sorted_scores[0]
+        second_cat, second_raw_score = sorted_scores[1]
 
-        # Bound score between 0.20 and 0.92 (never claim 100% certainty for heuristics)
-        calibrated_score = round(min(0.92, max(0.20, top_raw_score)), 4)
+        # Calibrate score between 0.20 and 0.88
+        calibrated_score = round(min(0.88, max(0.20, top_raw_score)), 4)
         ymin, xmin, ymax, xmax = features["bounding_box"]
         bbox_xywh = [xmin, ymin, round(xmax - xmin, 4), round(ymax - ymin, 4)]
         latency_ms = round((time.time() - t0) * 1000, 2)
 
-        # Layer 5: Unknown and Manual Review Handling
-        # If confidence is below 0.38, classify honestly as 'unknown' and flag for manual review
-        if calibrated_score < 0.38:
-            predicted_category = "unknown"
-            detected_item = "Uncertain Waste Material"
+        # Unknown / Manual review threshold: < 0.32
+        if calibrated_score < 0.32:
+            pred_cat = "unknown"
+            item_name = "Uncertain Waste Material"
             requires_review = True
             color = "#94A3B8"
         else:
-            predicted_category = top_category
-            detected_item = subitem_names.get(top_category, f"{top_category} Item")
+            pred_cat = top_cat
+            item_name = subitem_names.get(top_cat, f"{top_cat} Item")
             requires_review = (calibrated_score < settings.AI_CONFIDENCE_THRESHOLD)
-            color = CATEGORY_COLORS.get(predicted_category, "#3B82F6")
+            color = CATEGORY_COLORS.get(pred_cat, "#3B82F6")
+
+        weight_map = {
+            "E-Waste": 0.25, "Plastic": 0.08, "Paper": 0.05, "Cardboard": 0.35,
+            "Glass": 0.45, "Metal": 0.15, "Organic Waste": 0.60, "Food Waste": 0.50,
+            "Textile Waste": 0.30, "Hazardous Waste": 0.20, "Mixed Waste": 0.40,
+            "unknown": 0.25
+        }
 
         return {
             "success": True,
-            "predicted_category": predicted_category,
-            "detected_item": detected_item,
+            "predicted_category": pred_cat,
+            "detected_item": item_name,
             "confidence": calibrated_score,
             "confidence_pct": int(calibrated_score * 100),
             "heuristic_score": calibrated_score,
@@ -363,7 +366,12 @@ class AIFallbackService:
             "bounding_box": [ymin, xmin, ymax, xmax],
             "bbox_xywh": bbox_xywh,
             "color": color,
+            "estimated_weight_kg": weight_map.get(pred_cat, 0.30),
             "latency_ms": latency_ms,
+            "secondary_prediction": {
+                "predicted_category": second_cat,
+                "confidence": round(min(0.70, second_raw_score), 3)
+            },
             "features_summary": {
                 "aspect_ratio": round(features["aspect_ratio"], 2),
                 "edge_density": round(features["edge_density"], 4),
@@ -373,15 +381,13 @@ class AIFallbackService:
                 "blue_ratio": round(features["blue_ratio"], 3)
             },
             "processing_timestamp": datetime.now(timezone.utc).isoformat(),
-            "stage_notes": "Classical Computer Vision Heuristic Fallback Analysis"
+            "stage_notes": "Classical Computer Vision Multi-Cue Heuristic Fallback Analysis"
         }
 
     @classmethod
     def classify_image(cls, image: Union[Image.Image, np.ndarray, bytes], filename_hint: str = "") -> Dict[str, Any]:
-        """Classifies a static uploaded image using classical computer vision fallback."""
         return cls.classify_with_fallback(image, filename_hint=filename_hint)
 
     @classmethod
     def classify_frame(cls, frame: Union[Image.Image, np.ndarray, bytes], filename_hint: str = "") -> Dict[str, Any]:
-        """Classifies a real-time video/webcam frame using classical computer vision fallback."""
         return cls.classify_with_fallback(frame, filename_hint=filename_hint)

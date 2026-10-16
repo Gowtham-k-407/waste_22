@@ -115,7 +115,7 @@ async def detect_frame_with_active_model(
     if active_model and AIVisionService._active_version != active_model.version:
         AIVisionService.switch_active_model(active_model.version)
 
-    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename or "")
+    analysis = AIVisionService.detect_and_classify(pil_img, filename_hint=file.filename or "", task="detection")
 
     category_colors = {
         "E-Waste": "#8B5CF6",       # Purple
