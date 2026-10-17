@@ -71,12 +71,48 @@ class Settings(BaseModel):
     STORAGE_SECRET_KEY: str = os.getenv("STORAGE_SECRET_KEY", "")
     STORAGE_REGION: str = os.getenv("STORAGE_REGION", "ap-south-1") # Chennai / Mumbai region
 
-    # Standalone AI Microservice Configuration (Independently Deployed)
-    AI_SERVICE_BASE_URL: str = os.getenv("AI_SERVICE_BASE_URL", os.getenv("AI_INFERENCE_URL", "http://localhost:8001"))
-    AI_SERVICE_API_KEY: str = os.getenv("AI_SERVICE_API_KEY", os.getenv("AI_INFERENCE_API_KEY", ""))
-    AI_INFERENCE_URL: str = os.getenv("AI_INFERENCE_URL", os.getenv("AI_SERVICE_BASE_URL", "http://localhost:8001"))
-    AI_INFERENCE_API_KEY: str = os.getenv("AI_INFERENCE_API_KEY", os.getenv("AI_SERVICE_API_KEY", ""))
+    # Standalone Local / Remote AI Microservice Configuration
+    # Supported deployment modes:
+    # 1. Localhost co-located: http://127.0.0.1:8001 (or 8000)
+    # 2. LAN device: http://<lan-ip>:8001 (e.g. http://10.79.201.32:8000)
+    # 3. Cloud / Remote URL: http://<remote-host>:<port>
+    AI_API_BASE_URL: str = os.getenv(
+        "AI_API_BASE_URL",
+        os.getenv("AI_SERVICE_BASE_URL", os.getenv("AI_INFERENCE_URL", "http://127.0.0.1:8001"))
+    )
+    AI_API_KEY: str = os.getenv(
+        "AI_API_KEY",
+        os.getenv("AI_API_TOKEN", os.getenv("AI_SERVICE_API_KEY", os.getenv("AI_INFERENCE_API_KEY", "")))
+    )
+    AI_ADMIN_API_KEY: str = os.getenv(
+        "AI_ADMIN_API_KEY",
+        os.getenv("AI_ADMIN_TOKEN", "")
+    )
 
+    # Backward-compatible aliases for legacy callers
+    AI_SERVICE_BASE_URL: str = os.getenv(
+        "AI_SERVICE_BASE_URL",
+        os.getenv("AI_API_BASE_URL", os.getenv("AI_INFERENCE_URL", "http://127.0.0.1:8001"))
+    )
+    AI_SERVICE_API_KEY: str = os.getenv(
+        "AI_SERVICE_API_KEY",
+        os.getenv("AI_API_KEY", os.getenv("AI_API_TOKEN", os.getenv("AI_INFERENCE_API_KEY", "")))
+    )
+    AI_INFERENCE_URL: str = os.getenv(
+        "AI_INFERENCE_URL",
+        os.getenv("AI_API_BASE_URL", os.getenv("AI_SERVICE_BASE_URL", "http://127.0.0.1:8001"))
+    )
+    AI_INFERENCE_API_KEY: str = os.getenv(
+        "AI_INFERENCE_API_KEY",
+        os.getenv("AI_API_KEY", os.getenv("AI_SERVICE_API_KEY", ""))
+    )
+
+    # HTTP Client Timeouts & Connection Pooling
+    AI_API_CONNECT_TIMEOUT_SECONDS: float = float(os.getenv("AI_API_CONNECT_TIMEOUT_SECONDS", "3.0"))
+    AI_API_TIMEOUT_SECONDS: float = float(os.getenv("AI_API_TIMEOUT_SECONDS", os.getenv("INFERENCE_TIMEOUT_SECONDS", os.getenv("AI_INFERENCE_TIMEOUT_SECONDS", "15.0"))))
+    AI_API_POOL_CONNECTIONS: int = int(os.getenv("AI_API_POOL_CONNECTIONS", "10"))
+    AI_API_POOL_MAXSIZE: int = int(os.getenv("AI_API_POOL_MAXSIZE", "25"))
+    AI_API_MAX_RETRIES: int = int(os.getenv("AI_API_MAX_RETRIES", "2"))
 
     # AI Fallback & Classification Configuration
     FALLBACK_CLASSIFICATION_ENABLED: bool = os.getenv("FALLBACK_CLASSIFICATION_ENABLED", "true").lower() in ("true", "1", "yes")

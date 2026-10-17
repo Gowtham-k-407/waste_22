@@ -574,10 +574,10 @@ class AIVisionService:
         - Camera frames -> YOLO11n (yolo11n.pt)
         Checks remote microservice if configured, else executes local PyTorch engine.
         """
-        # 1. Try remote AI microservice if configured
-        if settings.AI_SERVICE_BASE_URL and settings.AI_SERVICE_BASE_URL.strip():
+        # 1. Try standalone AI microservice if configured
+        from app.services.ai_client import AIServiceClient
+        if AIServiceClient.is_configured():
             try:
-                from app.services.ai_client import AIServiceClient
                 if task in ("detection", "detect", "frame"):
                     data = AIServiceClient.detect_frame(image)
                 else:
@@ -585,21 +585,26 @@ class AIVisionService:
 
                 cat = data.get("predicted_category")
                 conf = float(data.get("confidence", 0.0))
-                return {
-                    "predicted_category": cat,
-                    "detected_item": data.get("detected_item") or f"{cat} Item",
-                    "confidence": conf,
-                    "confidence_pct": int(data.get("confidence_pct", conf * 100)),
-                    "bounding_box": data.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
-                    "bbox_xywh": data.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
-                    "color": data.get("color", CATEGORY_COLORS.get(cat, "#3B82F6")),
-                    "classification_method": f"remote_ai_service_{task}",
-                    "latency_ms": data.get("latency_ms", 35.0),
-                    "model_name": data.get("model_name", "Remote-AI-Service"),
-                    "model_version": data.get("model_version", cls._active_version),
-                    "model_framework": data.get("framework", "PyTorch 2.2"),
-                    "detections": data.get("detections", [])
-                }
+                if data and data.get("success", True) and cat and conf > 0.0:
+                    return {
+                        "predicted_category": cat,
+                        "detected_item": data.get("detected_item") or f"{cat} Item",
+                        "confidence": conf,
+                        "confidence_pct": int(data.get("confidence_pct", conf * 100)),
+                        "bounding_box": data.get("bounding_box", [0.10, 0.10, 0.90, 0.90]),
+                        "bbox_xywh": data.get("bbox_xywh", [0.10, 0.10, 0.80, 0.80]),
+                        "color": data.get("color", CATEGORY_COLORS.get(cat, "#3B82F6")),
+                        "classification_method": data.get("classification_method") or f"remote_ai_service_{task}",
+                        "latency_ms": data.get("latency_ms", 35.0),
+                        "model_name": data.get("model_name", "Remote-AI-Service"),
+                        "model_version": data.get("model_version", cls._active_version),
+                        "model_framework": data.get("framework", "PyTorch 2.2"),
+                        "detections": data.get("detections", []),
+                        "top_predictions": data.get("top_predictions", []),
+                        "fallback_used": data.get("fallback_used", False),
+                        "requires_review": data.get("requires_review", False),
+                        "fallback_reason": data.get("fallback_reason")
+                    }
             except Exception as e:
                 logger.warning(f"Remote AI microservice unavailable (using local fallback engine): {e}")
 
@@ -705,9 +710,19 @@ class AIVisionService:
                         "model_version": prim.get("model_version", cls._active_version),
                         "model_framework": prim.get("model_framework", "Ultralytics YOLO11"),
                         "detections": prim.get("detections", []),
-                        "stage_notes": f"YOLO11n frame inference executed: {len(prim.get('detections', []))} detections"
+                        "stage_notes": f"YOLO11n frame inference executed: {len(prim.get('detections', []))} detections",
+                        "secondary_prediction": {
+                            "predicted_category": "Mixed Waste",
+                            "confidence": 0.20
+                        }
                     }
                 elif prim and prim.get("confidence", 0) >= settings.AI_CONFIDENCE_THRESHOLD and prim.get("predicted_category") in MUNICIPAL_CATEGORIES:
+                    sec_cat = "Plastic" if prim["predicted_category"] == "Organic Waste" else "Organic Waste"
+                    sec_conf = round(max(0.05, 1.0 - prim["confidence"]), 4)
+                    if prim.get("top_predictions") and len(prim["top_predictions"]) > 1:
+                        sec_cat = prim["top_predictions"][1].get("category", sec_cat)
+                        sec_conf = prim["top_predictions"][1].get("confidence", sec_conf)
+
                     primary_status = "success"
                     primary_result = {
                         "predicted_category": prim["predicted_category"],
@@ -725,7 +740,11 @@ class AIVisionService:
                         "model_name": prim.get("model_name", "ResNet50-WasteClassifier"),
                         "model_version": prim.get("model_version", cls._active_version),
                         "model_framework": prim.get("model_framework", "PyTorch 2.2"),
-                        "stage_notes": f"Primary neural model ({prim.get('model_name', task)}) executed successfully"
+                        "stage_notes": f"Primary neural model ({prim.get('model_name', task)}) executed successfully",
+                        "secondary_prediction": {
+                            "predicted_category": sec_cat,
+                            "confidence": sec_conf
+                        }
                     }
                 elif prim:
                     primary_status = "low_confidence" if prim.get("confidence", 0) < settings.AI_CONFIDENCE_THRESHOLD else "invalid_label"

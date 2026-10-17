@@ -143,6 +143,35 @@ async def detect_frame_with_active_model(
     m_framework = active_model.framework if active_model else "PyTorch 2.2 / YOLOv8-Waste"
     m_acc = active_model.accuracy if active_model else 0.918
 
+    # Predictions list: include all detected objects if available, with backward-compatible single item fallback
+    predictions = []
+    dets = analysis.get("detections")
+    if dets and isinstance(dets, list):
+        for d in dets:
+            d_cat = d.get("waste_category") or cat
+            d_color = d.get("color") or category_colors.get(d_cat, "#3B82F6")
+            predictions.append({
+                "object_name": d.get("object_name", analysis["detected_item"]),
+                "waste_category": d_cat,
+                "confidence": d.get("confidence_pct", analysis["confidence_pct"]),
+                "confidence_raw": d.get("confidence", analysis["confidence"]),
+                "bbox": d.get("bounding_box", bbox),
+                "bbox_xywh": d.get("bbox_xywh", bbox_xywh),
+                "color": d_color
+            })
+    if not predictions:
+        predictions = [
+            {
+                "object_name": analysis["detected_item"],
+                "waste_category": cat,
+                "confidence": analysis["confidence_pct"],
+                "confidence_raw": analysis["confidence"],
+                "bbox": bbox,
+                "bbox_xywh": bbox_xywh,
+                "color": color
+            }
+        ]
+
     return {
         "success": True,
         "model": {
@@ -152,17 +181,8 @@ async def detect_frame_with_active_model(
             "accuracy": m_acc,
             "status": "Active"
         },
-        "predictions": [
-            {
-                "object_name": analysis["detected_item"],
-                "waste_category": cat,
-                "confidence": analysis["confidence_pct"],
-                "confidence_raw": analysis["confidence"],
-                "bbox": analysis["bounding_box"],
-                "bbox_xywh": bbox_xywh,
-                "color": color
-            }
-        ],
+        "predictions": predictions,
+        "count": len(predictions),
         "bounding_box": analysis["bounding_box"],
         "bbox_xywh": bbox_xywh,
         "detected_item": analysis["detected_item"],
@@ -180,8 +200,10 @@ async def detect_frame_with_active_model(
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
     from app.core.database import check_database_health
+    from app.services.ai_client import AIServiceClient
     db_health = check_database_health()
     active_model = db.query(AIModelVersion).filter(AIModelVersion.is_active_production == True).first()
+    ai_health = AIServiceClient.get_health_summary(timeout=2.0)
     return {
         "status": "healthy" if db_health.get("healthy") else "degraded",
         "service": settings.PROJECT_NAME,
@@ -192,6 +214,7 @@ def health_check(db: Session = Depends(get_db)):
             "name": active_model.model_name if active_model else "GCC-WasteVision",
             "status": "Production"
         },
+        "ai_service": ai_health,
         "storage": {
             "provider": settings.STORAGE_PROVIDER,
             "bucket": settings.STORAGE_BUCKET if settings.STORAGE_PROVIDER == "s3" else "local_disk"
