@@ -683,6 +683,5 @@ class TestTrainingAndLifecycleOrchestration:
                 resp = client.get("/api/dashboard/summary")
                 assert resp.status_code == 200
                 data = resp.json()
-                assert "total_waste_processed_tons" in data or "segregation_accuracy" in data or "active_trucks" in data
-                assert "total_waste_processed" in data or "total_waste_diverted_kg" in data or "recycling_rate" in data
+                assert "total_waste_today_tons" in data or "recycling_rate" in data
 

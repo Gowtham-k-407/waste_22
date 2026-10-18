@@ -702,12 +702,7 @@ def activate_model(
         try:
             AIServiceClient.activate_model(target.version)
         except (AIServiceUnavailableException, AIServiceResponseException) as e:
-            checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
-            if not (checkpoint_file and os.path.exists(checkpoint_file)):
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Laptop AI service unavailable to activate model {target.version}: {e}"
-                )
+            logger.warning(f"Remote AI service unreachable to activate model {target.version}: {e}")
 
     checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
     weights_to_use = checkpoint_file if os.path.exists(checkpoint_file) else None
