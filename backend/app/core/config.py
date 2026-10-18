@@ -109,7 +109,7 @@ class Settings(BaseModel):
 
     # HTTP Client Timeouts & Connection Pooling
     AI_API_CONNECT_TIMEOUT_SECONDS: float = float(os.getenv("AI_API_CONNECT_TIMEOUT_SECONDS", "3.0"))
-    AI_API_TIMEOUT_SECONDS: float = float(os.getenv("AI_API_TIMEOUT_SECONDS", os.getenv("INFERENCE_TIMEOUT_SECONDS", os.getenv("AI_INFERENCE_TIMEOUT_SECONDS", "15.0"))))
+    AI_API_TIMEOUT_SECONDS: float = float(os.getenv("AI_API_TIMEOUT_SECONDS", os.getenv("INFERENCE_TIMEOUT_SECONDS", os.getenv("AI_INFERENCE_TIMEOUT_SECONDS", "60.0"))))
     AI_API_POOL_CONNECTIONS: int = int(os.getenv("AI_API_POOL_CONNECTIONS", "10"))
     AI_API_POOL_MAXSIZE: int = int(os.getenv("AI_API_POOL_MAXSIZE", "25"))
     AI_API_MAX_RETRIES: int = int(os.getenv("AI_API_MAX_RETRIES", "2"))

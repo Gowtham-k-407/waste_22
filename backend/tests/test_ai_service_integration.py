@@ -19,6 +19,7 @@ import re
 import os
 import json
 import uuid
+from datetime import datetime
 import pytest
 import numpy as np
 from PIL import Image
@@ -31,6 +32,7 @@ from app.core.database import UserSessionLocal, WasteSessionLocal
 from app.core.security import create_access_token, hash_password
 from app.models.user import User
 from app.models.detection import AIDetection
+from app.models.ai_model import AIModelVersion, TrainingJob
 from app.services.ai_client import (
     AIServiceClient,
     AIServiceUnavailableException,
@@ -439,3 +441,248 @@ class TestSecurityAndCodebaseSanity:
                                 violating_files.append(f"{fpath}:{line_no}")
 
         assert len(violating_files) == 0, f"Found hardcoded private IP in production code: {violating_files}"
+
+
+class TestTrainingAndLifecycleOrchestration:
+    """Verifies Task 2 Section E: Training, Retraining, Model Evaluation & Activation."""
+
+    def test_citizen_forbidden_from_triggering_training(self, setup_auth_tokens):
+        """Citizen role cannot initiate model training or retraining."""
+        citizen_headers = setup_auth_tokens["citizen_headers"]
+        resp = client.post("/api/admin/train-model", json={"total_epochs": 5}, headers=citizen_headers)
+        assert resp.status_code == 403
+
+    def test_unauthenticated_forbidden_from_triggering_training(self):
+        """Unauthenticated caller cannot initiate model training."""
+        resp = client.post("/api/admin/train-model", json={"total_epochs": 5})
+        assert resp.status_code in (401, 403)
+
+    def test_admin_dispatches_training_to_laptop_ai_service(self, setup_auth_tokens):
+        """Admin triggering training dispatches job to laptop AI API and persists job record."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+        remote_job_id = f"JOB-REMOTE-{uuid.uuid4().hex[:8]}"
+
+        mock_remote_job = {
+            "job_id": remote_job_id,
+            "status": "queued",
+            "stage": "initializing",
+            "message": "Retraining job queued on laptop AI server"
+        }
+
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(AIServiceClient, "submit_training_job", return_value=mock_remote_job) as mock_submit:
+                resp = client.post(
+                    "/api/admin/train-model",
+                    json={"candidate_version": f"v2.{uuid.uuid4().hex[:4]}", "total_epochs": 10, "batch_size": 16},
+                    headers=admin_headers
+                )
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["success"] is True
+                assert data["job_code"] == remote_job_id
+                mock_submit.assert_called_once()
+
+    def test_training_fails_controlled_when_laptop_offline(self, setup_auth_tokens):
+        """When laptop AI service is offline, return controlled 503 rather than fake training."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(
+                AIServiceClient,
+                "submit_training_job",
+                side_effect=AIServiceUnavailableException("Laptop AI compute server offline at http://127.0.0.1:8001")
+            ):
+                resp = client.post(
+                    "/api/admin/train-model",
+                    json={"candidate_version": f"v2.{uuid.uuid4().hex[:4]}", "total_epochs": 5},
+                    headers=admin_headers
+                )
+                assert resp.status_code == 503
+                detail = resp.json().get("detail", "")
+                assert "unavailable" in detail.lower() or "offline" in detail.lower()
+
+    def test_training_status_polling_synchronizes_remote_telemetry(self, setup_auth_tokens):
+        """Polling /api/admin/training-status synchronizes remote job metrics and progress."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+        sync_job_code = f"JOB-SYNC-{uuid.uuid4().hex[:8]}"
+
+        waste_db = WasteSessionLocal()
+        try:
+            job = TrainingJob(
+                job_code=sync_job_code,
+                candidate_version=f"v2.{uuid.uuid4().hex[:4]}",
+                status="running",
+                stage="training",
+                current_epoch=2,
+                total_epochs=10,
+                progress_pct=20.0,
+                started_at=datetime.utcnow()
+            )
+            waste_db.add(job)
+            waste_db.commit()
+        finally:
+            waste_db.close()
+
+        mock_remote_status = {
+            "job_id": sync_job_code,
+            "status": "running",
+            "stage": "training",
+            "progress_pct": 65.5,
+            "current_epoch": 7,
+            "total_epochs": 10,
+            "log_output": "[12:00:00] Fine-tuning ResNet50 epoch 7...\n",
+            "metrics": {
+                "val_accuracy": 0.923,
+                "val_f1": 0.915,
+                "precision": 0.920,
+                "recall": 0.910,
+                "train_loss": 0.082,
+                "val_loss": 0.105
+            }
+        }
+
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(AIServiceClient, "get_training_job_status", return_value=mock_remote_status):
+                resp = client.get("/api/admin/training-status", headers=admin_headers)
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["job_code"] == sync_job_code
+                assert data["progress_pct"] == 65.5
+                assert data["current_epoch"] == 7
+                assert data["status"] == "running"
+
+    def test_completed_remote_training_registers_candidate_model(self, setup_auth_tokens):
+        """When remote training finishes, candidate model is registered in AIModelVersion."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+        completed_job_code = f"JOB-COMPLETED-{uuid.uuid4().hex[:8]}"
+        candidate_ver = f"v2.{uuid.uuid4().hex[:5]}"
+
+        waste_db = WasteSessionLocal()
+        try:
+            job = TrainingJob(
+                job_code=completed_job_code,
+                candidate_version=candidate_ver,
+                status="running",
+                stage="evaluating",
+                current_epoch=10,
+                total_epochs=10,
+                progress_pct=95.0,
+                started_at=datetime.utcnow()
+            )
+            waste_db.add(job)
+            waste_db.commit()
+        finally:
+            waste_db.close()
+
+        mock_completed_remote = {
+            "job_id": completed_job_code,
+            "status": "completed",
+            "stage": "completed",
+            "progress_pct": 100.0,
+            "current_epoch": 10,
+            "total_epochs": 10,
+            "log_output": "[12:05:00] PyTorch evaluation gate passed.\n",
+            "metrics": {
+                "val_accuracy": 0.935,
+                "val_f1": 0.928,
+                "precision": 0.932,
+                "recall": 0.925,
+                "train_loss": 0.065,
+                "val_loss": 0.091
+            },
+            "evaluation_report": {
+                "quality_checks_passed": True,
+                "candidate_accuracy": 0.935
+            }
+        }
+
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(AIServiceClient, "get_training_job_status", return_value=mock_completed_remote):
+                resp = client.get("/api/admin/training-status", headers=admin_headers)
+                assert resp.status_code == 200
+                assert resp.json()["status"] == "completed"
+
+                # Verify candidate model registered in database
+                waste_db = WasteSessionLocal()
+                try:
+                    cand = waste_db.query(AIModelVersion).filter(AIModelVersion.version == candidate_ver).first()
+                    assert cand is not None
+                    assert cand.status == "candidate"
+                    assert cand.accuracy == 0.935
+                finally:
+                    waste_db.close()
+
+    def test_activate_model_notifies_laptop_ai_service(self, setup_auth_tokens):
+        """Activating candidate model invokes laptop AI activation endpoint."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+        act_ver = f"v2.{uuid.uuid4().hex[:5]}"
+
+        waste_db = WasteSessionLocal()
+        try:
+            model = AIModelVersion(
+                version=act_ver,
+                model_name="Test-Candidate-Model",
+                framework="PyTorch",
+                status="candidate",
+                accuracy=0.92,
+                precision=0.91,
+                recall=0.90,
+                f1_score=0.915,
+                is_active_production=False
+            )
+            waste_db.add(model)
+            waste_db.commit()
+            model_id = model.id
+        finally:
+            waste_db.close()
+
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(AIServiceClient, "activate_model", return_value={"success": True}) as mock_act:
+                resp = client.post(f"/api/admin/models/{model_id}/activate", headers=admin_headers)
+                assert resp.status_code == 200
+                mock_act.assert_called_once_with(act_ver)
+
+    def test_rejected_candidate_blocked_from_activation(self, setup_auth_tokens):
+        """Models that failed validation evaluation gates cannot be activated."""
+        admin_headers = setup_auth_tokens["admin_headers"]
+        rej_ver = f"v2.{uuid.uuid4().hex[:5]}-rej"
+
+        waste_db = WasteSessionLocal()
+        try:
+            model = AIModelVersion(
+                version=rej_ver,
+                model_name="Failed-Candidate-Model",
+                framework="PyTorch",
+                status="candidate_rejected",
+                accuracy=0.65,
+                precision=0.60,
+                recall=0.55,
+                f1_score=0.57,
+                is_active_production=False
+            )
+            waste_db.add(model)
+            waste_db.commit()
+            model_id = model.id
+        finally:
+            waste_db.close()
+
+        resp = client.post(f"/api/admin/models/{model_id}/activate", headers=admin_headers)
+        assert resp.status_code == 400
+        assert "failed validation evaluation gates" in resp.json()["detail"].lower()
+
+    def test_dashboard_stats_loads_when_ai_offline(self):
+        """Dashboard overview metrics remain operational when AI service is offline."""
+        with patch.object(AIServiceClient, "is_configured", return_value=True):
+            with patch.object(AIServiceClient, "get_health_summary", return_value={
+                "configured": True,
+                "reachable": False,
+                "inference_ready": False,
+                "status": "unreachable",
+                "latency_ms": 0.0
+            }):
+                resp = client.get("/api/dashboard/summary")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert "total_waste_processed_tons" in data or "segregation_accuracy" in data or "active_trucks" in data
+                assert "total_waste_processed" in data or "total_waste_diverted_kg" in data or "recycling_rate" in data
+

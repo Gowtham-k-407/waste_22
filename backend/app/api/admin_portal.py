@@ -617,7 +617,9 @@ def trigger_training(
         learning_rate=req.learning_rate or 0.001
     )
     if not result["success"]:
-        raise HTTPException(status_code=400, detail=result["message"])
+        msg = result["message"]
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if ("unavailable" in msg.lower() or "unreachable" in msg.lower()) else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=msg)
     return result
 
 
@@ -692,8 +694,21 @@ def activate_model(
             detail=f"Cannot activate candidate model {target.version}: It failed validation evaluation gates."
         )
 
+    from app.services.ai_client import AIServiceClient, AIServiceUnavailableException, AIServiceResponseException
     from app.services.ai_vision_service import AIVisionService
     from app.core.config import settings
+
+    if AIServiceClient.is_configured():
+        try:
+            AIServiceClient.activate_model(target.version)
+        except (AIServiceUnavailableException, AIServiceResponseException) as e:
+            checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
+            if not (checkpoint_file and os.path.exists(checkpoint_file)):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Laptop AI service unavailable to activate model {target.version}: {e}"
+                )
+
     checkpoint_file = getattr(target, "weights_path", None) or os.path.join(settings.MODELS_DIR, f"classifier_{target.version}.pt")
     weights_to_use = checkpoint_file if os.path.exists(checkpoint_file) else None
     
@@ -729,6 +744,13 @@ def rollback_to_model(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
+    from app.services.ai_client import AIServiceClient, AIServiceUnavailableException, AIServiceResponseException
+    target = db.query(AIModelVersion).filter(AIModelVersion.id == model_id).first()
+    if target and AIServiceClient.is_configured():
+        try:
+            AIServiceClient.rollback_model(target.version)
+        except (AIServiceUnavailableException, AIServiceResponseException) as e:
+            logger.warning(f"Remote AI rollback notification failed: {e}")
     return activate_model(model_id, admin=admin, db=db)
 
 
