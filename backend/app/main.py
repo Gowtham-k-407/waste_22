@@ -24,10 +24,8 @@ from app.api import (
 )
 from app.services.mqtt_service import start_mqtt_client_if_configured
 
-# Initialize tables for all three isolated logical databases
-UserBase.metadata.create_all(bind=user_engine)
-StaffBase.metadata.create_all(bind=staff_engine)
-WasteBase.metadata.create_all(bind=waste_engine)
+# Initialize tables for consolidated PostgreSQL database
+Base.metadata.create_all(bind=engine)
 
 # Seed all 3 databases idempotently (preserves existing data)
 seed_all_databases()

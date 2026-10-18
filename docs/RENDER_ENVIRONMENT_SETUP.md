@@ -21,15 +21,19 @@ WasteDash is structured to run as distinct, decoupled cloud resources on Render:
 │       RENDER WEB SERVICE        │  Private  │       RENDER WEB SERVICE        │
 │       Backend (FastAPI)         │──────────▶│   AI Inference Microservice     │
 │    e.g. waste-22.onrender.com   │   HTTP    │   (Optional Standalone Worker)  │
-└───────┬────────┬────────┬───────┘           └─────────────────────────────────┘
-        │        │        │
-        │        │        │ Private PostgreSQL Connections
-        ▼        ▼        ▼
-┌──────────────┬──────────────┬──────────────┐
-│  DATABASE A  │  DATABASE B  │  DATABASE C  │
-│  User & Auth │    Staff     │  Operations  │
-│  PostgreSQL  │  PostgreSQL  │  PostgreSQL  │
-└──────────────┴──────────────┴──────────────┘
+└────────────────┬────────────────┘           └─────────────────────────────────┘
+                 │
+                 │ Single PostgreSQL Connection Pool (DATABASE_URL)
+                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│               RENDER CONSOLIDATED POSTGRESQL DATABASE           │
+│                                                                 │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │
+│  │ Domain: users   │  │ Domain: staff    │  │ Domain: waste_  │ │
+│  │ Accounts & Auth │  │ Profiles & Roles │  │ management      │ │
+│  │ (users.* views) │  │ (staff.* views)  │  │ (waste_mgmt.*)  │ │
+│  └─────────────────┘  └──────────────────┘  └─────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -82,10 +86,10 @@ WasteDash is structured to run as distinct, decoupled cloud resources on Render:
 | `ALGORITHM` | No | `HS256` | JWT signature algorithm |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `10080` | Session expiration in minutes (7 days) |
 | `CORS_ORIGINS` | **Yes** | `https://<your-frontend>.onrender.com,http://localhost:3000` | Comma-separated allowed web origins |
-| `USER_DATABASE_URL` | **Yes** | `postgresql://user:pass@dpg-users.render.com/wastedash_users` | Render Database A connection URI |
-| `STAFF_DATABASE_URL` | **Yes** | `postgresql://user:pass@dpg-staff.render.com/wastedash_staff` | Render Database B connection URI |
-| `WASTE_DATABASE_URL` | **Yes** | `postgresql://user:pass@dpg-ops.render.com/wastedash_operations` | Render Database C connection URI |
-| `DATABASE_URL` | No | *(Defaults to `WASTE_DATABASE_URL`)* | Legacy compatibility pointer |
+| `DATABASE_URL` | **Yes** | `postgresql://user:pass@dpg-abc123-a.render.com/wastedash` | Consolidated Render PostgreSQL Internal Connection URI |
+| `USER_DATABASE_URL` | No | *(Defaults to `DATABASE_URL`)* | Optional domain alias (backward compatibility) |
+| `STAFF_DATABASE_URL` | No | *(Defaults to `DATABASE_URL`)* | Optional domain alias (backward compatibility) |
+| `WASTE_DATABASE_URL` | No | *(Defaults to `DATABASE_URL`)* | Optional domain alias (backward compatibility) |
 | `STORAGE_PROVIDER` | No | `local` *(or `s3` for cloud storage)* | File storage driver (`local` or `s3`) |
 | `STORAGE_BUCKET` | If s3 | `wastedash-production-assets` | S3 bucket name |
 | `STORAGE_ENDPOINT` | If s3 | *(Optional for Cloudflare R2 / MinIO)* | Custom S3 endpoint URL |
@@ -142,48 +146,72 @@ WasteDash is structured to run as distinct, decoupled cloud resources on Render:
 
 ---
 
-## 3. Database Safety & Render PostgreSQL Provisioning
+## 3. Database Architecture & Render PostgreSQL Provisioning
 
-### Why Three Databases?
-Monolithic municipal applications often fail security audits when operational telemetry shares physical tables with citizen authentication data and employee records. WasteDash uses three isolated schemas:
-1. **Database A (`USER_DATABASE_URL`)**: Citizen accounts, Bcrypt hashes, password resets, audit logs.
-2. **Database B (`STAFF_DATABASE_URL`)**: 35 GCC municipal staff designations, employee IDs, ward boundaries.
-3. **Database C (`WASTE_DATABASE_URL`)**: 200 Wards, 12 Plants, 24 Vehicles, IoT Telemetry, Grievances, AI Datasets.
+### Consolidated Architecture with Three Logical Domains
+The application consolidates all data into a single PostgreSQL database with connection pooling while strictly maintaining three logical domains:
+1. **Domain: `users`**: Citizen and admin accounts, bcrypt password hashes, password reset tokens, authentication audit logs, and AI reference linkages.
+2. **Domain: `waste_management`**: Municipal zones (15), wards (200), processing plants (12), collection fleet (24 vehicles), waste categories (11), detections, complaints, IoT telemetry, and recommendations.
+3. **Domain: `staff`**: Municipal staff profiles (35 designations), duty assignments, and staff audit logs.
+
+PostgreSQL schemas (`users`, `staff`, `waste_management`) and updatable domain views provide full domain encapsulation without altering existing ORM queries.
 
 ### Step-by-Step Render PostgreSQL Provisioning
 
 1. In the Render Dashboard, click **New +** → **PostgreSQL**.
-2. Create **Database 1**:
-   - **Name**: `wastedash-users-db`
-   - **Database**: `wastedash_users`
-   - **User**: `user_admin`
-   - Copy the **Internal Database URL** (e.g., `postgres://user_admin:...@dpg-xxxx-a.render.com/wastedash_users`)
-   - Assign to Backend environment variable: `USER_DATABASE_URL`
-3. Create **Database 2**:
-   - **Name**: `wastedash-staff-db`
-   - **Database**: `wastedash_staff`
-   - **User**: `staff_admin`
-   - Copy the **Internal Database URL**
-   - Assign to Backend environment variable: `STAFF_DATABASE_URL`
-4. Create **Database 3**:
-   - **Name**: `wastedash-operations-db`
-   - **Database**: `wastedash_operations`
-   - **User**: `ops_admin`
-   - Copy the **Internal Database URL**
-   - Assign to Backend environment variable: `WASTE_DATABASE_URL`
+2. Configure the database instance:
+   - **Name**: `wastedash-postgres`
+   - **Database**: `wastedash`
+   - **User**: `wastedash_admin`
+   - **Region**: Choose the same region as the backend service (e.g. `Oregon (US West)` or `Frankfurt`) for low-latency private networking.
+   - **Plan**: `Starter` or higher (free tier can be used for initial testing).
+3. Copy the **Internal Database URL** (e.g., `postgres://wastedash_admin:...@dpg-xxxx-a.render.com/wastedash`).
+   - Private networking within Render eliminates public internet egress latency and egress costs.
+4. Set the environment variable in the Backend Web Service:
+   - `DATABASE_URL` = `[Paste the Render Internal Database URL]`
+   - *(Note: `APP_ENV=production` ensures no fallback to SQLite can ever occur in production).*
 
 > [!NOTE]
-> Render provides database URLs starting with `postgres://`. The WasteDash configuration engine (`normalize_database_url` in `backend/app/core/config.py`) automatically translates this prefix to `postgresql://` to satisfy modern SQLAlchemy requirements.
+> Render provides database URLs starting with `postgres://`. The WasteDash configuration engine (`normalize_database_url` in `backend/app/core/config.py`) automatically translates this prefix to `postgresql+psycopg2://` to enforce the high-performance psycopg2 driver.
 
-### Safe Data Migration from Local SQLite to Render PostgreSQL
+### Database Migration & Zero-Downtime Deployment Sequence
 
-To populate initial municipal taxonomy without losing data:
-1. Set the remote connection strings in a temporary migration environment.
-2. Run the idempotent migration utility:
-   ```bash
-   python backend/migrate_legacy_db.py
-   ```
-3. The script creates schemas, applies necessary indexes, seeds initial GCC taxonomy (200 wards, 12 plants, 24 vehicles), and validates record counts.
+Follow this safe cutover sequence:
+
+```
+1. Provision PostgreSQL on Render
+               │
+               ▼
+2. Configure DATABASE_URL in Render Backend Environment
+               │
+               ▼
+3. Run Alembic Schema Migrations
+   Command: alembic upgrade head
+               │
+               ▼
+4. Run Repeatable Data Migration & Integrity Verification
+   Command: python backend/migrate_to_postgres.py
+               │
+               ▼
+5. Verify Health Check (/api/health)
+   Response: {"status": "healthy", "database": {"engine": "postgresql", ...}}
+               │
+               ▼
+6. Complete Production Cutover
+```
+
+#### Running the Migration Script
+The migration utility handles SHA-256 backup creation, topological table ordering, type conversion, idempotent inserts, and sequence synchronization:
+```bash
+# Set target URL and execute migration:
+DATABASE_URL="postgresql://wastedash_admin:password@dpg-xxxx-a.render.com/wastedash" python backend/migrate_to_postgres.py
+```
+Key safety guarantees:
+- **Verified Backups**: Automatically creates timestamped SHA-256 checksummed backups of all three SQLite files in `backend/backups/`.
+- **Zero Data Loss**: Preserves all IDs, bcrypt password hashes, and cross-domain relationships.
+- **Idempotent**: Safe to re-run; uses `ON CONFLICT DO NOTHING` to prevent duplicates.
+- **Sequence Synchronization**: Automatically aligns all PostgreSQL auto-increment sequences (`nextval`) to `MAX(id) + 1`.
+- **Rollback Procedure**: In the unlikely event of an issue, restoring the original SQLite databases from `backend/backups/` and reverting `DATABASE_URL` restores immediate operational state.
 
 ---
 

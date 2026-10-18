@@ -7,11 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def normalize_database_url(url: str) -> str:
-    """Ensure database URL is SQLAlchemy-compatible (fix Heroku/Render postgres:// prefix)."""
+    """Ensure database URL is SQLAlchemy-compatible with psycopg2 driver."""
     if not url:
         return url
     if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql://", 1)
+        return url.replace("postgres://", "postgresql+psycopg2://", 1)
+    if url.startswith("postgresql://") and not url.startswith("postgresql+"):
+        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return url
 
 class Settings(BaseModel):
@@ -36,32 +38,18 @@ class Settings(BaseModel):
     MEDIA_DIR: str = os.getenv("MEDIA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "uploads"))
     MODELS_DIR: str = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models_checkpoints"))
 
-    # Three Distinct Logical Databases (Database A: User, Database B: Staff, Database C: Waste)
-    USER_DATABASE_URL: str = normalize_database_url(
-        os.getenv(
-            "USER_DATABASE_URL",
-            f"sqlite:///{os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'users.db').replace(os.sep, '/')}"
-        )
-    )
-    STAFF_DATABASE_URL: str = normalize_database_url(
-        os.getenv(
-            "STAFF_DATABASE_URL",
-            f"sqlite:///{os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'staff.db').replace(os.sep, '/')}"
-        )
-    )
-    WASTE_DATABASE_URL: str = normalize_database_url(
-        os.getenv(
-            "WASTE_DATABASE_URL",
-            f"sqlite:///{os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'waste_management.db').replace(os.sep, '/')}"
-        )
-    )
-    # Legacy fallback database pointer
+    # Consolidated PostgreSQL Database Configuration
     DATABASE_URL: str = normalize_database_url(
         os.getenv(
             "DATABASE_URL",
-            f"sqlite:///{os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'chennai_waste.db').replace(os.sep, '/')}"
+            os.getenv("WASTE_DATABASE_URL", os.getenv("USER_DATABASE_URL", os.getenv("STAFF_DATABASE_URL", "")))
         )
     )
+
+    # Three Logical Domains (Users, Staff, Waste Management) mapped to Consolidated PostgreSQL
+    USER_DATABASE_URL: str = normalize_database_url(os.getenv("USER_DATABASE_URL", DATABASE_URL))
+    STAFF_DATABASE_URL: str = normalize_database_url(os.getenv("STAFF_DATABASE_URL", DATABASE_URL))
+    WASTE_DATABASE_URL: str = normalize_database_url(os.getenv("WASTE_DATABASE_URL", DATABASE_URL))
 
     # Storage Configuration (Local or S3-compatible: AWS S3, Cloudflare R2, MinIO)
     STORAGE_PROVIDER: str = os.getenv("STORAGE_PROVIDER", "local").lower() # "local" | "s3"

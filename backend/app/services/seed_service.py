@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.security import hash_password
 from app.core.database import (
+    engine, Base, SessionLocal,
     user_engine, staff_engine, waste_engine,
     UserSessionLocal, StaffSessionLocal, WasteSessionLocal,
     UserBase, StaffBase, WasteBase
@@ -97,11 +98,9 @@ WARD_NAMES = [
 ]
 
 def init_all_tables():
-    """Ensure tables are created independently in all three databases."""
-    logger.info("Initializing tables in Database A (Users), Database B (Staff), and Database C (Waste Operations)...")
-    UserBase.metadata.create_all(bind=user_engine)
-    StaffBase.metadata.create_all(bind=staff_engine)
-    WasteBase.metadata.create_all(bind=waste_engine)
+    """Ensure all 33 tables across the three logical domains are created in consolidated PostgreSQL."""
+    logger.info("Initializing consolidated tables in PostgreSQL (Users, Staff, Waste Operations)...")
+    Base.metadata.create_all(bind=engine)
 
 def seed_database_a(user_db: Session):
     """Seed Database A: Users and Authentication."""
